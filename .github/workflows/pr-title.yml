@@ -7,9 +7,22 @@ on:
   workflow_call:
     inputs:
       types:
-        description: "Comma-separated allowed types. Default matches AGENTS.md."
+        # v6 of amannn/action-semantic-pull-request splits enum inputs on
+        # newlines only. Passing commas is treated as a single opaque type.
+        description: "Newline-separated allowed types (YAML multiline). Default matches AGENTS.md."
         required: false
-        default: "build,chore,ci,docs,feat,fix,perf,refactor,revert,style,test"
+        default: |
+          build
+          chore
+          ci
+          docs
+          feat
+          fix
+          perf
+          refactor
+          revert
+          style
+          test
         type: string
       require-scope:
         description: "Types that MUST include a scope. Default: feat,fix,refactor,perf."
