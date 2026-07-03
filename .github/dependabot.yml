@@ -8,6 +8,12 @@ updates:
       actions:
         patterns:
           - "*"
+    ignore:
+      # v6 introduced a release-type check that rejects `feat` without a
+      # semantic-release config. Stay on v5 until we migrate config.
+      - dependency-name: "amannn/action-semantic-pull-request"
+        update-types:
+          - "version-update:semver-major"
     commit-message:
       prefix: chore
       include: scope

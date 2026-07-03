@@ -34,7 +34,11 @@ jobs:
     permissions:
       pull-requests: read
     steps:
-      - uses: amannn/action-semantic-pull-request@v6
+      # Pinned to v5 deliberately. v6 introduced a "release types" check on top
+      # of the `types` input that rejects `feat` unless a semantic-release
+      # config is discovered. Not migrating until config shape is worked out.
+      # Dependabot ignore rule for the v6 major is set in .github/dependabot.yml.
+      - uses: amannn/action-semantic-pull-request@v5
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         with:

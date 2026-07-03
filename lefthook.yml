@@ -29,15 +29,19 @@ pre-commit:
 commit-msg:
   commands:
     convco:
-      run: convco check --from-msg {1}
+      run: convco check --from-stdin < {1}
 
 pre-push:
   commands:
     no-push-protected:
+      # Blocks push while HEAD is on main/master. Uses branch check instead of
+      # git's pre-push stdin protocol because lefthook does not forward stdin
+      # to commands by default and `while read` would hang.
       run: |
-        while read -r local_ref local_sha remote_ref remote_sha; do
-          case "$remote_ref" in
-            refs/heads/main|refs/heads/master)
-              echo "direct push to '$remote_ref' blocked."; exit 1 ;;
-          esac
-        done
+        branch=$(git symbolic-ref --short HEAD 2>/dev/null || echo detached)
+        case "$branch" in
+          main|master)
+            echo "direct push from '$branch' blocked. Switch to a feature branch first."
+            exit 1
+            ;;
+        esac
