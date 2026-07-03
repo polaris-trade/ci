@@ -42,7 +42,7 @@ jobs:
       msrv: ${{ steps.msrv.outputs.value }}
       toolchains: ${{ steps.toolchains.outputs.value }}
     steps:
-      - uses: actions/checkout@v5
+      - uses: actions/checkout@v7
 
       - name: extract MSRV
         id: msrv
@@ -79,7 +79,7 @@ jobs:
     name: rustfmt
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v5
+      - uses: actions/checkout@v7
       - uses: dtolnay/rust-toolchain@stable
         with:
           components: rustfmt
@@ -95,7 +95,7 @@ jobs:
         os: ${{ fromJSON(inputs.os-matrix) }}
         toolchain: ${{ fromJSON(needs.resolve-msrv.outputs.toolchains) }}
     steps:
-      - uses: actions/checkout@v5
+      - uses: actions/checkout@v7
 
       - name: install toolchain
         uses: dtolnay/rust-toolchain@master
