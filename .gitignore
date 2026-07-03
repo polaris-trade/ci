@@ -1,1 +1,4 @@
 downstream.json
+
+# lefthook local override
+lefthook-local.yml

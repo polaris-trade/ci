@@ -1,0 +1,43 @@
+# Local git hooks for the shared workflows repo (workflows/YAML only, no Rust).
+# Install once per clone: `lefthook install`.
+# Bypass a single commit with LEFTHOOK=0. Never bypass in shared work.
+
+pre-commit:
+  parallel: true
+  commands:
+    branch-name:
+      run: |
+        branch=$(git rev-parse --abbrev-ref HEAD)
+        case "$branch" in
+          main|master) echo "commit directly to '$branch' blocked. Open feature branch."; exit 1 ;;
+        esac
+        echo "$branch" | grep -qE '^(feat|fix|chore|docs|refactor|test|ci|perf|build|style|revert)/[a-z0-9._/-]+$' \
+          || { echo "branch '$branch' does not match '<type>/<slug>'."; exit 1; }
+
+    actionlint:
+      # GitHub Actions workflow linter. Install: `brew install actionlint` or
+      # `go install github.com/rhysd/actionlint/cmd/actionlint@latest`.
+      # Skipped automatically if binary is missing.
+      glob: ".github/workflows/*.{yml,yaml}"
+      run: |
+        if command -v actionlint >/dev/null 2>&1; then
+          actionlint {staged_files}
+        else
+          echo "actionlint not installed. Skipping." >&2
+        fi
+
+commit-msg:
+  commands:
+    convco:
+      run: convco check --from-msg {1}
+
+pre-push:
+  commands:
+    no-push-protected:
+      run: |
+        while read -r local_ref local_sha remote_ref remote_sha; do
+          case "$remote_ref" in
+            refs/heads/main|refs/heads/master)
+              echo "direct push to '$remote_ref' blocked."; exit 1 ;;
+          esac
+        done
