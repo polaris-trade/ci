@@ -1,0 +1,51 @@
+name: pr-title
+
+# Reusable Conventional Commits PR title linter. Matches the commitlint config
+# documented in workspace AGENTS.md: type(scope): subject, lowercase, ≤100 chars.
+
+on:
+  workflow_call:
+    inputs:
+      types:
+        description: "Comma-separated allowed types. Default matches AGENTS.md."
+        required: false
+        default: "build,chore,ci,docs,feat,fix,perf,refactor,revert,style,test"
+        type: string
+      require-scope:
+        description: "Types that MUST include a scope. Default: feat,fix,refactor,perf."
+        required: false
+        default: "feat,fix,refactor,perf"
+        type: string
+      subject-case:
+        description: "Subject case: lower-case, sentence-case, start-case, upper-case."
+        required: false
+        default: "lower-case"
+        type: string
+      header-max-length:
+        description: "Max header length."
+        required: false
+        default: "100"
+        type: string
+
+jobs:
+  lint:
+    name: conventional PR title
+    runs-on: ubuntu-latest
+    permissions:
+      pull-requests: read
+    steps:
+      - uses: amannn/action-semantic-pull-request@v5
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        with:
+          types: ${{ inputs.types }}
+          requireScope: false
+          scopes: ""
+          subjectPattern: ^(?![A-Z]).+$
+          subjectPatternError: |
+            The subject "{subject}" must start with lowercase. See workspace AGENTS.md
+            "Commit Message Convention".
+          headerPattern: '^(\w+)(?:\(([^)]+)\))?: (.+)$'
+          headerPatternCorrespondence: type, scope, subject
+          validateSingleCommit: false
+          validateSingleCommitMatchesPrTitle: false

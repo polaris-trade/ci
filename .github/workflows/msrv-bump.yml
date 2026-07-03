@@ -1,0 +1,130 @@
+name: msrv-bump
+
+# Fans out an MSRV bump PR to every repo in vars.DOWNSTREAM_REPOS.
+# The repo list is a private GitHub Actions variable (kept out of the public
+# ci repo). See downstream.example.json for the expected shape.
+#
+# Each downstream repo receives a PR that updates:
+#   - rust-toolchain.toml   channel = "<version>"
+#   - Cargo.toml            [workspace.package] rust-version = "<version>"
+#
+# Required repo config:
+#   - vars.DOWNSTREAM_REPOS  Actions variable holding the JSON body (Settings →
+#                            Secrets and variables → Actions → Variables tab).
+#   - secrets.MSRV_BUMP_TOKEN PAT with `repo` scope + write access to every
+#                             repo listed in DOWNSTREAM_REPOS.
+
+on:
+  workflow_dispatch:
+    inputs:
+      msrv:
+        description: "Target MSRV (e.g. 1.98.0). Must be a valid rustc version string."
+        required: true
+        type: string
+      dry-run:
+        description: "Show the plan and exit without opening PRs."
+        required: false
+        default: false
+        type: boolean
+
+jobs:
+  plan:
+    name: build plan
+    runs-on: ubuntu-latest
+    outputs:
+      matrix: ${{ steps.plan.outputs.matrix }}
+    steps:
+      - name: validate MSRV
+        run: |
+          if [[ ! "${{ inputs.msrv }}" =~ ^[0-9]+\.[0-9]+(\.[0-9]+)?$ ]]; then
+            echo "::error::input msrv '${{ inputs.msrv }}' is not a valid rustc version"
+            exit 1
+          fi
+
+      - name: emit repo matrix
+        id: plan
+        shell: bash
+        env:
+          DOWNSTREAM_JSON: ${{ vars.DOWNSTREAM_REPOS }}
+        run: |
+          set -euo pipefail
+          if [[ -z "${DOWNSTREAM_JSON:-}" ]]; then
+            echo "::error::vars.DOWNSTREAM_REPOS is empty. Set it in Settings → Secrets and variables → Actions → Variables tab. Shape: see downstream.example.json."
+            exit 1
+          fi
+          if ! echo "$DOWNSTREAM_JSON" | jq empty >/dev/null 2>&1; then
+            echo "::error::vars.DOWNSTREAM_REPOS is not valid JSON."
+            exit 1
+          fi
+          MATRIX=$(printf '%s' "$DOWNSTREAM_JSON" | jq -c '.repos')
+          if [[ "$MATRIX" == "null" || -z "$MATRIX" ]]; then
+            echo "::error::vars.DOWNSTREAM_REPOS is missing top-level .repos array."
+            exit 1
+          fi
+          echo "matrix=$MATRIX" >> "$GITHUB_OUTPUT"
+          echo "targets:"
+          printf '%s' "$DOWNSTREAM_JSON" | jq -r '.repos[] | "  - " + .repo + " (base: " + .base_branch + ")"'
+
+  bump:
+    name: bump ${{ matrix.target.repo }}
+    needs: plan
+    if: ${{ !inputs.dry-run }}
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      max-parallel: 4
+      matrix:
+        target: ${{ fromJSON(needs.plan.outputs.matrix) }}
+    steps:
+      - name: checkout downstream
+        uses: actions/checkout@v4
+        with:
+          repository: ${{ matrix.target.repo }}
+          ref: ${{ matrix.target.base_branch }}
+          token: ${{ secrets.MSRV_BUMP_TOKEN }}
+          path: downstream
+
+      - name: patch pins
+        working-directory: downstream
+        shell: bash
+        env:
+          MSRV: ${{ inputs.msrv }}
+        run: |
+          set -euo pipefail
+          if [[ -f rust-toolchain.toml ]]; then
+            sed -i -E 's/^(\s*channel\s*=\s*)"[^"]+"/\1"'"$MSRV"'"/' rust-toolchain.toml
+          else
+            echo "::warning::rust-toolchain.toml missing in ${{ matrix.target.repo }}; skipping."
+          fi
+          if [[ -f Cargo.toml ]]; then
+            sed -i -E 's/^(\s*rust-version\s*=\s*)"[^"]+"/\1"'"$MSRV"'"/' Cargo.toml
+          fi
+          git diff --exit-code && {
+            echo "::warning::no changes produced in ${{ matrix.target.repo }}; already at $MSRV."
+            exit 0
+          } || true
+
+      - name: create PR
+        uses: peter-evans/create-pull-request@v7
+        with:
+          path: downstream
+          token: ${{ secrets.MSRV_BUMP_TOKEN }}
+          branch: chore/msrv-bump-${{ inputs.msrv }}
+          base: ${{ matrix.target.base_branch }}
+          commit-message: |
+            chore(msrv): bump to ${{ inputs.msrv }}
+
+            Dispatched from polaris-trade/ci msrv-bump.yml.
+          title: "chore(msrv): bump to ${{ inputs.msrv }}"
+          body: |
+            Automated MSRV bump dispatched from [`polaris-trade/ci`](https://github.com/polaris-trade/ci/actions/workflows/msrv-bump.yml).
+
+            **Changes**
+            - `rust-toolchain.toml` `channel` → `${{ inputs.msrv }}`
+            - `Cargo.toml` `[workspace.package] rust-version` → `${{ inputs.msrv }}`
+
+            Merge once CI is green. Delete the branch on merge.
+          labels: |
+            chore
+            msrv
+          delete-branch: true

@@ -1,0 +1,63 @@
+name: release
+
+# Reusable release workflow driving release-plz.
+#
+# Single source of truth: Cargo.toml version + Conventional Commits since last tag.
+# Behaviour:
+#   1. `release-plz release-pr` opens or updates a "chore: release" PR that bumps
+#      the workspace/crate version(s) and regenerates CHANGELOG.md.
+#   2. When that PR is merged into main, `release-plz release` creates the git tag,
+#      publishes a GitHub Release with the changelog section, and (optionally)
+#      publishes to crates.io.
+#
+# The caller decides whether to publish to crates.io via `with.publish`.
+
+on:
+  workflow_call:
+    inputs:
+      publish:
+        description: "Publish to crates.io when the release PR is merged."
+        required: false
+        default: false
+        type: boolean
+      config-path:
+        description: "Path to release-plz.toml. Empty = defaults."
+        required: false
+        default: ""
+        type: string
+    secrets:
+      release-plz-token:
+        description: "PAT (contents: write + pull-requests: write). Required."
+        required: true
+      cargo-registry-token:
+        description: "crates.io token. Required only if publish=true."
+        required: false
+
+concurrency:
+  group: release-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: false
+
+jobs:
+  release:
+    name: release-plz
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+      pull-requests: write
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+          token: ${{ secrets.release-plz-token }}
+
+      - uses: dtolnay/rust-toolchain@stable
+
+      - uses: Swatinem/rust-cache@v2
+
+      - name: release-plz
+        uses: release-plz/action@v0.5
+        with:
+          config: ${{ inputs.config-path }}
+        env:
+          GITHUB_TOKEN: ${{ secrets.release-plz-token }}
+          CARGO_REGISTRY_TOKEN: ${{ inputs.publish && secrets.cargo-registry-token || '' }}

@@ -1,0 +1,13 @@
+{
+  "$comment": "EXAMPLE ONLY — checked into the public repo as a schema reference. The real list is stored as a private GitHub Actions repository variable named DOWNSTREAM_REPOS. See README.md § MSRV bump for how to set it.",
+  "repos": [
+    {
+      "repo": "{owner}/some-private-module",
+      "base_branch": "main"
+    },
+    {
+      "repo": "{owner}/another-private-module",
+      "base_branch": "main"
+    }
+  ]
+}
