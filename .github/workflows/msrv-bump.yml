@@ -77,7 +77,7 @@ jobs:
         target: ${{ fromJSON(needs.plan.outputs.matrix) }}
     steps:
       - name: checkout downstream
-        uses: actions/checkout@v4
+        uses: actions/checkout@v5
         with:
           repository: ${{ matrix.target.repo }}
           ref: ${{ matrix.target.base_branch }}
