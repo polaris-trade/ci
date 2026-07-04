@@ -37,9 +37,31 @@ concurrency:
   group: release-${{ github.workflow }}-${{ github.ref }}
   cancel-in-progress: false
 
+# Two jobs, mutually exclusive on head commit prefix.
+#   - release-pr : any commit on main that isn't a release-plz merge.
+#     Opens/updates the "chore(release): vX.Y.Z" PR. No tags, no releases.
+#   - release   : the release-plz PR just merged. Tags + GitHub Release +
+#     optional crates.io publish. Never runs on feature merges.
+# pr_name in release-plz.toml must start with "chore(release)" for the guard.
+
 jobs:
-  release:
-    name: release-plz
+  preflight:
+    name: preflight
+    runs-on: ubuntu-latest
+    steps:
+      - name: verify release-plz-token present
+        env:
+          TOKEN: ${{ secrets.release-plz-token }}
+        run: |
+          if [ -z "$TOKEN" ]; then
+            echo "::error::release-plz-token secret is empty. Set RELEASE_PLZ_TOKEN in the caller repo."
+            exit 1
+          fi
+
+  release-pr:
+    name: release-pr
+    needs: preflight
+    if: ${{ !startsWith(github.event.head_commit.message, 'chore(release)') }}
     runs-on: ubuntu-latest
     permissions:
       contents: write
@@ -54,9 +76,36 @@ jobs:
 
       - uses: Swatinem/rust-cache@v2
 
-      - name: release-plz
+      - name: release-plz release-pr
         uses: release-plz/action@v0.5
         with:
+          command: release-pr
+          config: ${{ inputs.config-path }}
+        env:
+          GITHUB_TOKEN: ${{ secrets.release-plz-token }}
+
+  release:
+    name: release
+    needs: preflight
+    if: ${{ startsWith(github.event.head_commit.message, 'chore(release)') }}
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+      pull-requests: write
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          fetch-depth: 0
+          token: ${{ secrets.release-plz-token }}
+
+      - uses: dtolnay/rust-toolchain@stable
+
+      - uses: Swatinem/rust-cache@v2
+
+      - name: release-plz release
+        uses: release-plz/action@v0.5
+        with:
+          command: release
           config: ${{ inputs.config-path }}
         env:
           GITHUB_TOKEN: ${{ secrets.release-plz-token }}

@@ -35,8 +35,35 @@ env:
   RUST_BACKTRACE: 1
 
 jobs:
+  changes:
+    # Gate downstream jobs on whether Rust-relevant files actually changed.
+    # Skipped jobs report success, so branch-protection required checks
+    # still pass on non-Rust PRs (docs, workflow tweaks, config).
+    name: detect changes
+    runs-on: ubuntu-latest
+    outputs:
+      rust: ${{ steps.filter.outputs.rust }}
+    steps:
+      - uses: actions/checkout@v7
+      - uses: dorny/paths-filter@v3
+        id: filter
+        with:
+          filters: |
+            rust:
+              - '**/*.rs'
+              - '**/Cargo.toml'
+              - 'Cargo.lock'
+              - 'rust-toolchain.toml'
+              - '.cargo/config.toml'
+              - 'rustfmt.toml'
+              - 'clippy.toml'
+              - 'deny.toml'
+              - '.github/workflows/**'
+
   resolve-msrv:
     name: resolve MSRV from rust-toolchain.toml
+    needs: changes
+    if: ${{ needs.changes.outputs.rust == 'true' }}
     runs-on: ubuntu-latest
     outputs:
       msrv: ${{ steps.msrv.outputs.value }}
@@ -77,6 +104,8 @@ jobs:
 
   fmt:
     name: rustfmt
+    needs: changes
+    if: ${{ needs.changes.outputs.rust == 'true' }}
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v7
@@ -87,7 +116,8 @@ jobs:
 
   test:
     name: test (${{ matrix.os }} / ${{ matrix.toolchain }})
-    needs: resolve-msrv
+    needs: [changes, resolve-msrv]
+    if: ${{ needs.changes.outputs.rust == 'true' }}
     runs-on: ${{ matrix.os }}
     strategy:
       fail-fast: false
