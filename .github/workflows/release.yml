@@ -8,15 +8,22 @@ name: release
 #      the workspace/crate version(s) and regenerates CHANGELOG.md.
 #   2. When that PR is merged into main, `release-plz release` creates the git tag,
 #      publishes a GitHub Release with the changelog section, and (optionally)
-#      publishes to crates.io.
+#      publishes to the target Kellnr registry.
 #
-# The caller decides whether to publish to crates.io via `with.publish`.
+# Two Kellnr registries are wired:
+#   `polaris`          — OSS registry (registry-oss-rs.fly.dev). Anon-readable.
+#   `polaris-internal` — private registry (registry-internal-rs.fly.dev).
+#                        Token-gated read + write; per-crate ACL.
+# Which one a crate publishes to is decided in each inner Cargo.toml via
+# `[package] publish = ["polaris"]` or `["polaris-internal"]`. This workflow
+# just wires both registries + tokens into cargo's config so release-plz can
+# resolve either.
 
 on:
   workflow_call:
     inputs:
       publish:
-        description: "Publish to crates.io when the release PR is merged."
+        description: "Publish to Kellnr when the release PR merges."
         required: false
         default: false
         type: boolean
@@ -25,12 +32,25 @@ on:
         required: false
         default: ""
         type: string
+      polaris-index-url:
+        description: "Sparse-index URL of the OSS Kellnr registry."
+        required: false
+        default: "sparse+https://registry-oss-rs.fly.dev/api/v1/crates/"
+        type: string
+      polaris-internal-index-url:
+        description: "Sparse-index URL of the internal (private) Kellnr registry."
+        required: false
+        default: "sparse+https://registry-internal-rs.fly.dev/api/v1/crates/"
+        type: string
     secrets:
       release-plz-token:
         description: "PAT (contents: write + pull-requests: write). Required."
         required: true
-      cargo-registry-token:
-        description: "crates.io token. Required only if publish=true."
+      cargo-registries-polaris-token:
+        description: "OSS Kellnr token. Required when publish=true and crate targets polaris."
+        required: false
+      cargo-registries-polaris-internal-token:
+        description: "Private Kellnr token. Required when publish=true and crate targets polaris-internal."
         required: false
 
 concurrency:
@@ -41,7 +61,7 @@ concurrency:
 #   - release-pr : any commit on main that isn't a release-plz merge.
 #     Opens/updates the "chore(release): vX.Y.Z" PR. No tags, no releases.
 #   - release   : the release-plz PR just merged. Tags + GitHub Release +
-#     optional crates.io publish. Never runs on feature merges.
+#     optional Kellnr publish. Never runs on feature merges.
 # pr_name in release-plz.toml must start with "chore(release)" for the guard.
 
 jobs:
@@ -76,6 +96,17 @@ jobs:
 
       - uses: Swatinem/rust-cache@v2
 
+      - name: configure alt registries
+        run: |
+          mkdir -p ~/.cargo
+          cat >> ~/.cargo/config.toml <<EOF
+          [registries.polaris]
+          index = "${{ inputs.polaris-index-url }}"
+
+          [registries.polaris-internal]
+          index = "${{ inputs.polaris-internal-index-url }}"
+          EOF
+
       - name: release-plz release-pr
         uses: release-plz/action@v0.5
         with:
@@ -83,6 +114,8 @@ jobs:
           config: ${{ inputs.config-path }}
         env:
           GITHUB_TOKEN: ${{ secrets.release-plz-token }}
+          CARGO_REGISTRIES_POLARIS_TOKEN: ${{ secrets.cargo-registries-polaris-token }}
+          CARGO_REGISTRIES_POLARIS_INTERNAL_TOKEN: ${{ secrets.cargo-registries-polaris-internal-token }}
 
   release:
     name: release
@@ -102,6 +135,17 @@ jobs:
 
       - uses: Swatinem/rust-cache@v2
 
+      - name: configure alt registries
+        run: |
+          mkdir -p ~/.cargo
+          cat >> ~/.cargo/config.toml <<EOF
+          [registries.polaris]
+          index = "${{ inputs.polaris-index-url }}"
+
+          [registries.polaris-internal]
+          index = "${{ inputs.polaris-internal-index-url }}"
+          EOF
+
       - name: release-plz release
         uses: release-plz/action@v0.5
         with:
@@ -109,4 +153,5 @@ jobs:
           config: ${{ inputs.config-path }}
         env:
           GITHUB_TOKEN: ${{ secrets.release-plz-token }}
-          CARGO_REGISTRY_TOKEN: ${{ inputs.publish && secrets.cargo-registry-token || '' }}
+          CARGO_REGISTRIES_POLARIS_TOKEN: ${{ inputs.publish && secrets.cargo-registries-polaris-token || '' }}
+          CARGO_REGISTRIES_POLARIS_INTERNAL_TOKEN: ${{ inputs.publish && secrets.cargo-registries-polaris-internal-token || '' }}

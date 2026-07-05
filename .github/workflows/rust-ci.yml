@@ -1,9 +1,10 @@
 name: rust-ci
 
-# Reusable Rust CI: fmt, clippy, cargo-nextest across a 3-OS × 3-toolchain matrix.
-# MSRV is read from the caller's rust-toolchain.toml — single source of truth
-# per module. Stable and nightly are always exercised. Central bumps to this
-# workflow ship on next @ref resolution.
+# Reusable Rust CI: fmt, clippy, cargo-nextest across a 3-OS × N-toolchain matrix.
+# Toolchain matrix is derived at run-time from the live rust-lang stable channel:
+#   [stable-N, stable-N+1, ..., stable-1, stable, nightly]
+# where N = `msrv-window` (default 3). No manual pin, no rust-toolchain.toml
+# dependency. Central bumps to this workflow ship on next @ref resolution.
 
 on:
   workflow_call:
@@ -24,15 +25,45 @@ on:
         default: '["ubuntu-latest", "macos-latest", "windows-latest"]'
         type: string
       extra-toolchains:
-        description: "JSON array of extra toolchains added to {msrv, stable, nightly}."
+        description: "JSON array of extra toolchains added to the rolling window (e.g. [\"beta\"])."
         required: false
         default: '[]'
         type: string
+      msrv-window:
+        description: "How many stable releases below latest to test. Default 3 = MSRV of stable-3."
+        required: false
+        default: 3
+        type: number
+      polaris-index-url:
+        description: "Sparse-index URL of the OSS Kellnr registry."
+        required: false
+        default: "sparse+https://registry-oss-rs.fly.dev/api/v1/crates/"
+        type: string
+      polaris-internal-index-url:
+        description: "Sparse-index URL of the internal (private) Kellnr registry."
+        required: false
+        default: "sparse+https://registry-internal-rs.fly.dev/api/v1/crates/"
+        type: string
+    secrets:
+      cargo-registries-polaris-token:
+        description: "OSS Kellnr read token. Optional when polaris is anon-read."
+        required: false
+      cargo-registries-polaris-internal-token:
+        description: "Private Kellnr read token. Required for repos with polaris-internal deps."
+        required: false
 
 env:
   CARGO_TERM_COLOR: always
   RUSTFLAGS: "-D warnings"
   RUST_BACKTRACE: 1
+
+# Cancel in-flight CI on a ref when a new commit lands on that same ref.
+# main pushes preserved (never canceled): each main push kicks a fresh matrix
+# and the previous one runs to completion, so release-plz sees the last one.
+# PR branches cancel — force-pushes + squash merges reclaim ~5-10 min each.
+concurrency:
+  group: rust-ci-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: ${{ github.ref != 'refs/heads/main' }}
 
 jobs:
   changes:
@@ -60,47 +91,53 @@ jobs:
               - 'deny.toml'
               - '.github/workflows/**'
 
-  resolve-msrv:
-    name: resolve MSRV from rust-toolchain.toml
+  resolve-toolchains:
+    name: resolve toolchain matrix (stable-N..stable, nightly)
     needs: changes
     if: ${{ needs.changes.outputs.rust == 'true' }}
     runs-on: ubuntu-latest
     outputs:
-      msrv: ${{ steps.msrv.outputs.value }}
-      toolchains: ${{ steps.toolchains.outputs.value }}
+      msrv: ${{ steps.matrix.outputs.msrv }}
+      toolchains: ${{ steps.matrix.outputs.toolchains }}
     steps:
-      - uses: actions/checkout@v7
-
-      - name: extract MSRV
-        id: msrv
-        shell: bash
-        run: |
-          set -euo pipefail
-          if [[ ! -f rust-toolchain.toml ]]; then
-            echo "::error::rust-toolchain.toml missing at repo root; required for MSRV resolution."
-            exit 1
-          fi
-          # accept either channel = "1.96.0" or channel = "1.96"
-          MSRV=$(grep -E '^\s*channel\s*=' rust-toolchain.toml | head -n1 | sed -E 's/.*"([^"]+)".*/\1/')
-          if [[ -z "$MSRV" ]]; then
-            echo "::error::could not parse channel from rust-toolchain.toml"
-            exit 1
-          fi
-          echo "MSRV=$MSRV"
-          echo "value=$MSRV" >> "$GITHUB_OUTPUT"
-
-      - name: build toolchain matrix
-        id: toolchains
+      - name: fetch current stable + compute matrix
+        id: matrix
         shell: bash
         env:
-          MSRV: ${{ steps.msrv.outputs.value }}
+          WINDOW: ${{ inputs.msrv-window }}
           EXTRA: ${{ inputs.extra-toolchains }}
         run: |
           set -euo pipefail
-          BASE=$(printf '["%s","stable","nightly"]' "$MSRV")
+          # Live stable version from the rust-lang release channel manifest.
+          # Manifest has `version = ` under many `[pkg.*]` sections; the one that
+          # matters is `[pkg.rust]`. Anchor on that section header.
+          # Save to disk first: awk's `exit` closes the pipe early, which turns
+          # `curl -o -` into a broken-pipe (exit 23) under `pipefail`.
+          curl -sSL -o channel.toml https://static.rust-lang.org/dist/channel-rust-stable.toml
+          STABLE=$(awk '/^\[pkg\.rust\]$/{f=1; next} f && /^version = /{ print; exit }' channel.toml \
+            | sed -E 's/.*"([0-9]+\.[0-9]+\.[0-9]+).*/\1/')
+          rm -f channel.toml
+          if [[ -z "$STABLE" ]]; then
+            echo "::error::could not parse current stable from channel-rust-stable.toml"
+            exit 1
+          fi
+          MAJOR=$(echo "$STABLE" | cut -d. -f1)
+          MINOR=$(echo "$STABLE" | cut -d. -f2)
+          MSRV_MINOR=$((MINOR - WINDOW))
+          MSRV="${MAJOR}.${MSRV_MINOR}"
+          echo "stable=$STABLE msrv=$MSRV (window=$WINDOW)"
+
+          # Build rolling matrix: [msrv, msrv+1, ..., stable-1, stable, nightly].
+          entries=()
+          for i in $(seq 0 "$WINDOW"); do
+            entries+=("\"${MAJOR}.$((MSRV_MINOR + i))\"")
+          done
+          entries+=("\"nightly\"")
+          BASE="[$(IFS=,; echo "${entries[*]}")]"
           COMBINED=$(jq -c --argjson base "$BASE" --argjson extra "$EXTRA" -n '$base + $extra | unique')
           echo "toolchains=$COMBINED"
-          echo "value=$COMBINED" >> "$GITHUB_OUTPUT"
+          echo "msrv=$MSRV" >> "$GITHUB_OUTPUT"
+          echo "toolchains=$COMBINED" >> "$GITHUB_OUTPUT"
 
   fmt:
     name: rustfmt
@@ -109,23 +146,70 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v7
+
+      - name: cache rustup toolchain
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.rustup/toolchains/stable-*
+            ~/.rustup/update-hashes/stable-*
+          key: rustup-ubuntu-latest-stable
+          restore-keys: |
+            rustup-ubuntu-latest-
+
       - uses: dtolnay/rust-toolchain@stable
         with:
           components: rustfmt
+
+      - name: configure alt registries
+        shell: bash
+        env:
+          POLARIS_TOKEN: ${{ secrets.cargo-registries-polaris-token }}
+          POLARIS_INTERNAL_TOKEN: ${{ secrets.cargo-registries-polaris-internal-token }}
+        run: |
+          mkdir -p ~/.cargo
+          cat >> ~/.cargo/config.toml <<EOF
+          [registries.polaris]
+          index = "${{ inputs.polaris-index-url }}"
+
+          [registries.polaris-internal]
+          index = "${{ inputs.polaris-internal-index-url }}"
+          EOF
+          if [ -n "$POLARIS_TOKEN" ] || [ -n "$POLARIS_INTERNAL_TOKEN" ]; then
+            cat >> ~/.cargo/credentials.toml <<EOF
+          [registries.polaris]
+          token = "Bearer ${POLARIS_TOKEN}"
+
+          [registries.polaris-internal]
+          token = "Bearer ${POLARIS_INTERNAL_TOKEN}"
+          EOF
+            chmod 600 ~/.cargo/credentials.toml
+          fi
+
       - run: cargo fmt --all -- --check
 
   test:
-    name: test (${{ matrix.os }} / ${{ matrix.toolchain }})
-    needs: [changes, resolve-msrv]
+    name: ${{ matrix.os == 'ubuntu-latest' && 'linux' || (matrix.os == 'macos-latest' && 'mac' || 'win') }}-${{ matrix.toolchain }}
+    needs: [changes, resolve-toolchains]
     if: ${{ needs.changes.outputs.rust == 'true' }}
     runs-on: ${{ matrix.os }}
     strategy:
       fail-fast: false
       matrix:
         os: ${{ fromJSON(inputs.os-matrix) }}
-        toolchain: ${{ fromJSON(needs.resolve-msrv.outputs.toolchains) }}
+        toolchain: ${{ fromJSON(needs.resolve-toolchains.outputs.toolchains) }}
     steps:
       - uses: actions/checkout@v7
+
+      - name: cache rustup toolchain
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.rustup/toolchains/${{ matrix.toolchain }}-*
+            ~/.rustup/update-hashes/${{ matrix.toolchain }}-*
+          key: rustup-${{ matrix.os }}-${{ matrix.toolchain }}
+          restore-keys: |
+            rustup-${{ matrix.os }}-
 
       - name: install toolchain
         uses: dtolnay/rust-toolchain@master
@@ -141,6 +225,31 @@ jobs:
         uses: taiki-e/install-action@v2
         with:
           tool: cargo-nextest
+
+      - name: configure alt registries
+        shell: bash
+        env:
+          POLARIS_TOKEN: ${{ secrets.cargo-registries-polaris-token }}
+          POLARIS_INTERNAL_TOKEN: ${{ secrets.cargo-registries-polaris-internal-token }}
+        run: |
+          mkdir -p ~/.cargo
+          cat >> ~/.cargo/config.toml <<EOF
+          [registries.polaris]
+          index = "${{ inputs.polaris-index-url }}"
+
+          [registries.polaris-internal]
+          index = "${{ inputs.polaris-internal-index-url }}"
+          EOF
+          if [ -n "$POLARIS_TOKEN" ] || [ -n "$POLARIS_INTERNAL_TOKEN" ]; then
+            cat >> ~/.cargo/credentials.toml <<EOF
+          [registries.polaris]
+          token = "Bearer ${POLARIS_TOKEN}"
+
+          [registries.polaris-internal]
+          token = "Bearer ${POLARIS_INTERNAL_TOKEN}"
+          EOF
+            chmod 600 ~/.cargo/credentials.toml
+          fi
 
       - name: clippy
         run: cargo clippy --workspace --all-targets ${{ inputs.workspace-args }} -- -D warnings
