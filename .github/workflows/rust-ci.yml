@@ -34,24 +34,6 @@ on:
         required: false
         default: 3
         type: number
-      polaris-index-url:
-        description: "Sparse-index URL of the OSS Kellnr registry."
-        required: false
-        default: "sparse+https://registry-oss-rs.fly.dev/api/v1/crates/"
-        type: string
-      polaris-internal-index-url:
-        description: "Sparse-index URL of the internal (private) Kellnr registry."
-        required: false
-        default: "sparse+https://registry-internal-rs.fly.dev/api/v1/crates/"
-        type: string
-    secrets:
-      cargo-registries-polaris-token:
-        description: "OSS Kellnr read token. Optional when polaris is anon-read."
-        required: false
-      cargo-registries-polaris-internal-token:
-        description: "Private Kellnr read token. Required for repos with polaris-internal deps."
-        required: false
-
 env:
   CARGO_TERM_COLOR: always
   RUSTFLAGS: "-D warnings"
@@ -161,31 +143,6 @@ jobs:
         with:
           components: rustfmt
 
-      - name: configure alt registries
-        shell: bash
-        env:
-          POLARIS_TOKEN: ${{ secrets.cargo-registries-polaris-token }}
-          POLARIS_INTERNAL_TOKEN: ${{ secrets.cargo-registries-polaris-internal-token }}
-        run: |
-          mkdir -p ~/.cargo
-          cat >> ~/.cargo/config.toml <<EOF
-          [registries.polaris]
-          index = "${{ inputs.polaris-index-url }}"
-
-          [registries.polaris-internal]
-          index = "${{ inputs.polaris-internal-index-url }}"
-          EOF
-          if [ -n "$POLARIS_TOKEN" ] || [ -n "$POLARIS_INTERNAL_TOKEN" ]; then
-            cat >> ~/.cargo/credentials.toml <<EOF
-          [registries.polaris]
-          token = "Bearer ${POLARIS_TOKEN}"
-
-          [registries.polaris-internal]
-          token = "Bearer ${POLARIS_INTERNAL_TOKEN}"
-          EOF
-            chmod 600 ~/.cargo/credentials.toml
-          fi
-
       - run: cargo fmt --all -- --check
 
   test:
@@ -225,31 +182,6 @@ jobs:
         uses: taiki-e/install-action@v2
         with:
           tool: cargo-nextest
-
-      - name: configure alt registries
-        shell: bash
-        env:
-          POLARIS_TOKEN: ${{ secrets.cargo-registries-polaris-token }}
-          POLARIS_INTERNAL_TOKEN: ${{ secrets.cargo-registries-polaris-internal-token }}
-        run: |
-          mkdir -p ~/.cargo
-          cat >> ~/.cargo/config.toml <<EOF
-          [registries.polaris]
-          index = "${{ inputs.polaris-index-url }}"
-
-          [registries.polaris-internal]
-          index = "${{ inputs.polaris-internal-index-url }}"
-          EOF
-          if [ -n "$POLARIS_TOKEN" ] || [ -n "$POLARIS_INTERNAL_TOKEN" ]; then
-            cat >> ~/.cargo/credentials.toml <<EOF
-          [registries.polaris]
-          token = "Bearer ${POLARIS_TOKEN}"
-
-          [registries.polaris-internal]
-          token = "Bearer ${POLARIS_INTERNAL_TOKEN}"
-          EOF
-            chmod 600 ~/.cargo/credentials.toml
-          fi
 
       - name: clippy
         run: cargo clippy --workspace --all-targets ${{ inputs.workspace-args }} -- -D warnings

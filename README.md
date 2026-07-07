@@ -67,11 +67,8 @@ on:
 jobs:
   release:
     uses: {org|user}/ci/.github/workflows/release.yml@main
-    with:
-      publish: true   # publish to crates.io on merge of the release PR
     secrets:
-      cargo-registry-token: ${{ secrets.CARGO_REGISTRY_TOKEN }}
-      release-plz-token:    ${{ secrets.RELEASE_PLZ_TOKEN }}
+      release-plz-token: ${{ secrets.RELEASE_PLZ_TOKEN }}
 ```
 
 ## What `rust-ci.yml` runs
@@ -117,14 +114,13 @@ Every module wires `release.yml`. Under the hood: `release-plz`.
 
 - Reads Conventional Commits since last tag (already enforced by `pr-title.yml`).
 - Opens a release PR bumping `Cargo.toml` version + generating `CHANGELOG.md`.
-- On merge: tags `vX.Y.Z`, creates a GitHub Release with the changelog section, optionally publishes to crates.io.
+- On merge: tags `vX.Y.Z` and creates a GitHub Release with the changelog section. No `cargo publish` — every crate sets `publish = false` (git-tag distribution).
 
 Single source of truth: `Cargo.toml` version + commit history. No manual `git tag`.
 
 ### Required secrets per consuming repo
 
 - `RELEASE_PLZ_TOKEN` — PAT with `contents: write` + `pull-requests: write`. Cannot use the default `GITHUB_TOKEN` (its PRs don't trigger downstream workflows).
-- `CARGO_REGISTRY_TOKEN` — only if `with: publish: true`.
 
 ## Pinning `@ref`
 
