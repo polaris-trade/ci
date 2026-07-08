@@ -41,7 +41,7 @@ env:
 
 # Cancel in-flight CI on a ref when a new commit lands on that same ref.
 # main pushes preserved (never canceled): each main push kicks a fresh matrix
-# and the previous one runs to completion, so release-plz sees the last one.
+# and the previous one runs to completion, so release-please sees the last one.
 # PR branches cancel — force-pushes + squash merges reclaim ~5-10 min each.
 concurrency:
   group: rust-ci-${{ github.workflow }}-${{ github.ref }}

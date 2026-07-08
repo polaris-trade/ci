@@ -10,10 +10,10 @@ Shared, reusable GitHub Actions workflows for every module. Right now only suppo
 ci/
   .github/
     workflows/
-      rust-ci.yml     # workflow_call: fmt, clippy, cargo nextest, 3-OS × 3-toolchain matrix
-      pr-title.yml    # workflow_call: Conventional Commits PR title lint
-      release.yml     # workflow_call: release-plz auto-tag, changelog, publish
-      msrv-bump.yml   # workflow_dispatch: fan out MSRV bump PRs to downstream repos
+      rust-ci.yml        # workflow_call: fmt, clippy, cargo nextest, 3-OS × 3-toolchain matrix
+      pr-title.yml       # workflow_call: Conventional Commits PR title lint
+      release-please.yml # workflow_call: release-please version-bump PR, tag, GitHub Release
+      msrv-bump.yml      # workflow_dispatch: fan out MSRV bump PRs to downstream repos
   downstream.example.json  # schema reference. Real list lives in vars.DOWNSTREAM_REPOS.
   README.md
 ```
@@ -66,10 +66,12 @@ on:
 
 jobs:
   release:
-    uses: {org|user}/ci/.github/workflows/release.yml@main
+    uses: {org|user}/ci/.github/workflows/release-please.yml@main
     secrets:
-      release-plz-token: ${{ secrets.RELEASE_PLZ_TOKEN }}
+      release-token: ${{ secrets.RELEASE_PLZ_TOKEN }}
 ```
+
+Each caller also carries a `release-please-config.json` (release-type `rust`, `component` = crate name, `include-component-in-tag`) and a `.release-please-manifest.json` (current version) at its repo root.
 
 ## What `rust-ci.yml` runs
 
@@ -110,13 +112,15 @@ Merge each generated PR when green.
 
 ## Release process
 
-Every module wires `release.yml`. Under the hood: `release-plz`.
+Every module wires `release-please.yml`. Under the hood: `googleapis/release-please-action`.
 
 - Reads Conventional Commits since last tag (already enforced by `pr-title.yml`).
 - Opens a release PR bumping `Cargo.toml` version + generating `CHANGELOG.md`.
-- On merge: tags `vX.Y.Z` and creates a GitHub Release with the changelog section. No `cargo publish` — every crate sets `publish = false` (git-tag distribution).
+- On merge: tags `<crate>-vX.Y.Z` and creates a GitHub Release with the changelog section. No `cargo publish` — every crate sets `publish = false` (git-tag distribution).
 
-Single source of truth: `Cargo.toml` version + commit history. No manual `git tag`.
+Single source of truth: `.release-please-manifest.json` version + commit history. No manual `git tag`.
+
+Why not `release-plz`: it runs `cargo package` internally to compute the next version, and `cargo package` cannot resolve an unpublished cross-repo git dependency (`transport_core` is git-tag only, on no registry), so it fails. release-please only edits `Cargo.toml` + `CHANGELOG.md` as text, so unpublished git deps are a non-issue.
 
 ### Required secrets per consuming repo
 
