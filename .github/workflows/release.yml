@@ -1,17 +1,19 @@
 name: release
 
-# Reusable release workflow driving release-plz.
+# Reusable release workflow. release-plz opens the version-bump PR; tagging is
+# done directly (see below).
 #
 # Single source of truth: Cargo.toml version + Conventional Commits since last tag.
 # Behaviour:
-#   1. `release-plz release-pr` opens or updates a "chore: release" PR that bumps
+#   1. `release-plz release-pr` opens or updates a "chore(release)" PR that bumps
 #      the workspace/crate version(s) and regenerates CHANGELOG.md.
-#   2. When that PR is merged into main, `release-plz release` creates the git tag
-#      and publishes a GitHub Release with the changelog section.
+#   2. When that PR is merged into main, the `release` job tags the merged
+#      manifest version and creates a GitHub Release from the changelog section.
 #
-# No cargo registry: every crate sets `publish = false`, so release-plz tags +
-# releases on GitHub only, never runs `cargo publish`. Cross-module deps resolve
-# from git tags; consumers depend on crates by git tag, not a registry.
+# Why not `release-plz release`: it is publish-driven and, with `publish = false`
+# (git-tag distribution, no registry), publishes nothing and so tags nothing.
+# We tag directly instead. Cross-module deps resolve from git tags; consumers
+# depend on crates by git tag, not a registry.
 
 on:
   workflow_call:
@@ -31,10 +33,10 @@ concurrency:
   cancel-in-progress: false
 
 # Two jobs, mutually exclusive on head commit prefix.
-#   - release-pr : any commit on main that isn't a release-plz merge.
+#   - release-pr : any commit on main that isn't a release PR merge.
 #     Opens/updates the "chore(release): vX.Y.Z" PR. No tags, no releases.
-#   - release   : the release-plz PR just merged. Tags + GitHub Release.
-#     No cargo publish (publish = false). Never runs on feature merges.
+#   - release   : the release PR just merged. Tags the manifest version +
+#     creates the GitHub Release. Idempotent; never runs on feature merges.
 # pr_name in release-plz.toml must start with "chore(release)" for the guard.
 
 jobs:
@@ -93,12 +95,34 @@ jobs:
 
       - uses: dtolnay/rust-toolchain@stable
 
-      - uses: Swatinem/rust-cache@v2
-
-      - name: release-plz release
-        uses: release-plz/action@v0.5
-        with:
-          command: release
-          config: ${{ inputs.config-path }}
+      - name: tag + GitHub release (git-tag distribution, publish = false)
         env:
-          GITHUB_TOKEN: ${{ secrets.release-plz-token }}
+          GH_TOKEN: ${{ secrets.release-plz-token }}
+        run: |
+          set -euo pipefail
+          # release-plz `release` is publish-driven: with publish = false it
+          # publishes nothing and therefore tags nothing (silently logs
+          # "nothing to release"). This repo distributes by git tag only, so
+          # tag + create the GitHub Release here for every workspace member
+          # whose manifest version has no tag yet. Idempotent: skips versions
+          # already tagged/released, so re-runs are safe.
+          cargo metadata --no-deps --format-version 1 \
+            | jq -r '.packages[] | "\(.name)\t\(.version)"' \
+          | while IFS="$(printf '\t')" read -r name version; do
+              tag="${name}-v${version}"
+              if git rev-parse -q --verify "refs/tags/${tag}" >/dev/null 2>&1 \
+                 || gh release view "${tag}" --repo "${GITHUB_REPOSITORY}" >/dev/null 2>&1; then
+                echo "${tag}: already released, skipping"
+                continue
+              fi
+              echo "${tag}: creating tag + release at ${GITHUB_SHA}"
+              # Notes = the top CHANGELOG.md section (the just-released version).
+              notes="$(awk '/^## \[/{c++} c==1{print} c==2{exit}' CHANGELOG.md 2>/dev/null || true)"
+              if [ -n "${notes}" ]; then
+                gh release create "${tag}" --repo "${GITHUB_REPOSITORY}" \
+                  --target "${GITHUB_SHA}" --title "${name} v${version}" --notes "${notes}"
+              else
+                gh release create "${tag}" --repo "${GITHUB_REPOSITORY}" \
+                  --target "${GITHUB_SHA}" --title "${name} v${version}" --generate-notes
+              fi
+            done
