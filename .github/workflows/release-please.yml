@@ -29,6 +29,11 @@ on:
         required: false
         default: ".release-please-manifest.json"
         type: string
+      runner:
+        description: "runs-on value. Bare string (ubuntu-latest) or JSON array of labels for self-hosted."
+        required: false
+        default: "ubuntu-latest"
+        type: string
     secrets:
       release-token:
         description: "PAT (contents: write + pull-requests: write). A PAT (not GITHUB_TOKEN) so the tag push retriggers downstream CI."
@@ -41,7 +46,7 @@ concurrency:
 jobs:
   release-please:
     name: release-please
-    runs-on: ubuntu-latest
+    runs-on: ${{ startsWith(inputs.runner, '[') && fromJSON(inputs.runner) || inputs.runner }}
     permissions:
       contents: write
       pull-requests: write

@@ -34,6 +34,11 @@ on:
         required: false
         default: 3
         type: number
+      runner-linux:
+        description: "runs-on for internal Linux-only jobs (fmt, changes, resolve-toolchains). Bare string or JSON array of labels for self-hosted. Test matrix uses os-matrix independently."
+        required: false
+        default: "ubuntu-latest"
+        type: string
 env:
   CARGO_TERM_COLOR: always
   RUSTFLAGS: "-D warnings"
@@ -53,7 +58,7 @@ jobs:
     # Skipped jobs report success, so branch-protection required checks
     # still pass on non-Rust PRs (docs, workflow tweaks, config).
     name: detect changes
-    runs-on: ubuntu-latest
+    runs-on: ${{ startsWith(inputs.runner-linux, '[') && fromJSON(inputs.runner-linux) || inputs.runner-linux }}
     outputs:
       rust: ${{ steps.filter.outputs.rust }}
     steps:
@@ -77,7 +82,7 @@ jobs:
     name: resolve toolchain matrix (stable-N..stable, nightly)
     needs: changes
     if: ${{ needs.changes.outputs.rust == 'true' }}
-    runs-on: ubuntu-latest
+    runs-on: ${{ startsWith(inputs.runner-linux, '[') && fromJSON(inputs.runner-linux) || inputs.runner-linux }}
     outputs:
       msrv: ${{ steps.matrix.outputs.msrv }}
       toolchains: ${{ steps.matrix.outputs.toolchains }}
@@ -125,7 +130,7 @@ jobs:
     name: rustfmt
     needs: changes
     if: ${{ needs.changes.outputs.rust == 'true' }}
-    runs-on: ubuntu-latest
+    runs-on: ${{ startsWith(inputs.runner-linux, '[') && fromJSON(inputs.runner-linux) || inputs.runner-linux }}
     steps:
       - uses: actions/checkout@v7
 
