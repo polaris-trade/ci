@@ -133,13 +133,15 @@ jobs:
         uses: actions/cache@v4
         with:
           path: |
-            ~/.rustup/toolchains/stable-*
-            ~/.rustup/update-hashes/stable-*
-          key: rustup-ubuntu-latest-stable
+            ~/.rustup/toolchains/nightly-*
+            ~/.rustup/update-hashes/nightly-*
+          key: rustup-ubuntu-latest-nightly-fmt
           restore-keys: |
             rustup-ubuntu-latest-
 
-      - uses: dtolnay/rust-toolchain@stable
+      # nightly rustfmt: rustfmt.toml uses unstable import options (imports_granularity,
+      # group_imports). Stable rustfmt ignores them. Build/clippy/test stay on stable.
+      - uses: dtolnay/rust-toolchain@nightly
         with:
           components: rustfmt
 
