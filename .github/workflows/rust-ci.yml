@@ -153,7 +153,7 @@ jobs:
       - run: cargo fmt --all -- --check
 
   test:
-    name: ${{ matrix.os == 'ubuntu-latest' && 'linux' || (matrix.os == 'macos-latest' && 'mac' || 'win') }}-${{ matrix.toolchain }}
+    name: ${{ (matrix.os == 'macos-latest' || contains(matrix.os, 'macos')) && 'mac' || (matrix.os == 'windows-latest' || contains(matrix.os, 'windows')) && 'win' || 'linux' }}-${{ matrix.toolchain }}
     needs: [changes, resolve-toolchains]
     if: ${{ needs.changes.outputs.rust == 'true' }}
     runs-on: ${{ matrix.os }}
