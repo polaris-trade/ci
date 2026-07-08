@@ -1,0 +1,62 @@
+name: release-please
+
+# Reusable release workflow. release-please parses Conventional Commits, bumps
+# Cargo.toml + CHANGELOG.md in a release PR, then tags + creates the GitHub
+# Release when that PR merges. No cargo publish, no cargo package.
+#
+# Why not release-plz: release-plz runs `cargo package` internally to compute
+# the next version. `cargo package` cannot resolve an unpublished cross-repo git
+# dependency (transport_core is git-tag only, on no registry), so it always
+# fails once the polaris registry went away. release-please only edits
+# Cargo.toml + CHANGELOG.md as text, so unpublished git deps are a non-issue.
+# see release-plz #2595.
+#
+# Single source of truth: .release-please-manifest.json (current version) +
+# Conventional Commits since the last tag. Per-crate config in
+# release-please-config.json (release-type rust, component = crate name,
+# include-component-in-tag so tags stay <crate>-vX.Y.Z).
+
+on:
+  workflow_call:
+    inputs:
+      config-file:
+        description: "Path to release-please-config.json."
+        required: false
+        default: "release-please-config.json"
+        type: string
+      manifest-file:
+        description: "Path to .release-please-manifest.json."
+        required: false
+        default: ".release-please-manifest.json"
+        type: string
+    secrets:
+      release-token:
+        description: "PAT (contents: write + pull-requests: write). A PAT (not GITHUB_TOKEN) so the tag push retriggers downstream CI."
+        required: true
+
+concurrency:
+  group: release-please-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: false
+
+jobs:
+  release-please:
+    name: release-please
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+      pull-requests: write
+    steps:
+      - name: verify release-token present
+        env:
+          TOKEN: ${{ secrets.release-token }}
+        run: |
+          if [ -z "$TOKEN" ]; then
+            echo "::error::release-token secret is empty. Set RELEASE_PLZ_TOKEN in the caller repo."
+            exit 1
+          fi
+
+      - uses: googleapis/release-please-action@v5
+        with:
+          token: ${{ secrets.release-token }}
+          config-file: ${{ inputs.config-file }}
+          manifest-file: ${{ inputs.manifest-file }}
