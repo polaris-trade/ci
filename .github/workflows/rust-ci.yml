@@ -194,7 +194,11 @@ jobs:
         with:
           key: ${{ matrix.os }}-${{ matrix.toolchain }}
 
+      # Self-hosted runners pre-install cargo-nextest during VPS bootstrap.
+      # taiki-e/install-action's sha256 verify is flaky on AlmaLinux 9
+      # (SELinux + shared _work/_temp when multiple runners run on one host).
       - name: install cargo-nextest
+        if: ${{ runner.environment == 'github-hosted' }}
         uses: taiki-e/install-action@v2
         with:
           tool: cargo-nextest
