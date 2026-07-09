@@ -148,13 +148,17 @@ jobs:
           restore-keys: |
             rustup-ubuntu-latest-
 
-      # nightly rustfmt: rustfmt.toml uses unstable import options (imports_granularity,
-      # group_imports). Stable rustfmt ignores them. Build/clippy/test stay on stable.
+      # nightly rustfmt: rustfmt.toml uses unstable options (imports_granularity,
+      # group_imports, ignore). Stable rustfmt silently drops them. Build/clippy/test
+      # stay on stable.
       - uses: dtolnay/rust-toolchain@nightly
         with:
           components: rustfmt
 
-      - run: cargo fmt --all -- --check
+      # +nightly is required: the action only sets `rustup default`, and a repo's
+      # rust-toolchain.toml pin overrides the default, silently formatting on the
+      # pinned stable toolchain instead.
+      - run: cargo +nightly fmt --all -- --check
 
   test:
     name: ${{ (matrix.os == 'macos-latest' || contains(matrix.os, 'macos')) && 'mac' || (matrix.os == 'windows-latest' || contains(matrix.os, 'windows')) && 'win' || 'linux' }}-${{ matrix.toolchain }}
