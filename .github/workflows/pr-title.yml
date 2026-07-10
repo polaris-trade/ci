@@ -52,6 +52,11 @@ jobs:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         with:
           types: ${{ inputs.types }}
+          # release-please PRs default to the scopeless title "chore: release main",
+          # and release-please re-parses that exact title on the MERGED PR to decide
+          # what to tag. Retitling to satisfy requireScope breaks tagging (proto #8,
+          # #10), so skip linting its PRs entirely instead.
+          ignoreLabels: "autorelease: pending"
           # Every PR title must carry a scope: `type(scope): subject`.
           # v6 accepts boolean-as-string only. See workspace AGENTS.md
           # "Commit Message Convention".
