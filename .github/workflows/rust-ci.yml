@@ -30,9 +30,14 @@ on:
         default: '[]'
         type: string
       msrv-window:
-        description: "How many stable releases below latest to test. Default 3 = MSRV of stable-3."
+        description: "How many stable releases below latest to test on push (main). Default 3 = MSRV of stable-3."
         required: false
         default: 3
+        type: number
+      pr-msrv-window:
+        description: "MSRV window on pull_request events. Default 0 = [stable, nightly] only, for fast PR feedback. Raise to widen PR coverage."
+        required: false
+        default: 0
         type: number
       runner-linux:
         description: "runs-on for internal Linux-only jobs (fmt, changes, resolve-toolchains). Bare string or JSON array of labels for self-hosted. Test matrix uses os-matrix independently."
@@ -91,10 +96,17 @@ jobs:
         id: matrix
         shell: bash
         env:
-          WINDOW: ${{ inputs.msrv-window }}
+          MSRV_WINDOW: ${{ inputs.msrv-window }}
+          PR_WINDOW: ${{ inputs.pr-msrv-window }}
+          EVENT: ${{ github.event_name }}
           EXTRA: ${{ inputs.extra-toolchains }}
         run: |
           set -euo pipefail
+          # Fast PRs: pull_request uses the narrow pr-msrv-window (default 0 ->
+          # [stable, nightly]); push (main) uses the full rolling msrv-window.
+          # Select in bash, not a GHA `&& ||` expression, because window 0 is
+          # falsy there and would silently fall through to the push value.
+          if [ "$EVENT" = "pull_request" ]; then WINDOW="$PR_WINDOW"; else WINDOW="$MSRV_WINDOW"; fi
           # Live stable version from the rust-lang release channel manifest.
           # Manifest has `version = ` under many `[pkg.*]` sections; the one that
           # matters is `[pkg.rust]`. Anchor on that section header.
