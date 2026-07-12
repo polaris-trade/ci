@@ -44,6 +44,15 @@ on:
         required: false
         default: "ubuntu-latest"
         type: string
+      concurrency-key:
+        description: "Suffix that distinguishes the concurrency group. Give each caller job a unique value when one caller workflow invokes this reusable workflow more than once (e.g. base vs feature build), or the two invocations share a group and cancel each other."
+        required: false
+        default: ""
+        type: string
+    secrets:
+      private-dep-token:
+        description: "PAT with read (contents) on private cross-repo cargo git-dep sources. Omit for repos whose deps are all public or crates.io."
+        required: false
 env:
   CARGO_TERM_COLOR: always
   RUSTFLAGS: "-D warnings"
@@ -54,7 +63,7 @@ env:
 # and the previous one runs to completion, so release-please sees the last one.
 # PR branches cancel — force-pushes + squash merges reclaim ~5-10 min each.
 concurrency:
-  group: rust-ci-${{ github.workflow }}-${{ github.ref }}
+  group: rust-ci-${{ github.workflow }}-${{ github.ref }}-${{ inputs.concurrency-key }}
   cancel-in-progress: ${{ github.ref != 'refs/heads/main' }}
 
 jobs:
@@ -218,6 +227,27 @@ jobs:
         uses: taiki-e/install-action@v2
         with:
           tool: cargo-nextest
+
+      # Private cross-repo cargo git deps need a credential the runner lacks by
+      # default. Write it to a job-scoped gitconfig (RUNNER_TEMP is wiped per job)
+      # so the token never lands in a self-hosted runner's persistent ~/.gitconfig.
+      # cargo fetches via the git CLI, which honors GIT_CONFIG_GLOBAL. No-op when
+      # no token is passed (public/crates.io-only repos).
+      - name: configure private cross-repo dep auth
+        shell: bash
+        env:
+          TOKEN: ${{ secrets.private-dep-token }}
+        run: |
+          set -euo pipefail
+          if [[ -z "${TOKEN:-}" ]]; then
+            echo "no private-dep-token; skipping (public deps only)"
+            exit 0
+          fi
+          cfg="${RUNNER_TEMP}/dep-auth.gitconfig"
+          git config --file "$cfg" \
+            url."https://x-access-token:${TOKEN}@github.com/".insteadOf "https://github.com/"
+          echo "GIT_CONFIG_GLOBAL=$cfg" >> "$GITHUB_ENV"
+          echo "CARGO_NET_GIT_FETCH_WITH_CLI=true" >> "$GITHUB_ENV"
 
       - name: clippy
         run: cargo clippy --workspace --all-targets ${{ inputs.workspace-args }} -- -D warnings
