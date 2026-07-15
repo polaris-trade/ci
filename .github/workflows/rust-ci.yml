@@ -194,6 +194,14 @@ jobs:
     steps:
       - uses: actions/checkout@v7
 
+      # Windows Defender realtime scan locks a freshly linked .exe, so a heavy
+      # example/test link (aws-lc-sys + rustls + otel) hits LNK1104 "cannot open
+      # file". Exclude the workspace target dir from scanning on Windows runners.
+      - name: exclude target dir from Defender (Windows)
+        if: runner.os == 'Windows'
+        shell: pwsh
+        run: Add-MpPreference -ExclusionPath "${{ github.workspace }}\target"
+
       # Self-hosted runners keep ~/.rustup and ~/.cargo and target/ persistent
       # across jobs, so the GitHub cache API round-trip is pure waste. Gate
       # both cache steps to GitHub-hosted runners only.
