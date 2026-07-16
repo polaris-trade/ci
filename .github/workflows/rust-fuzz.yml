@@ -1,0 +1,164 @@
+name: rust-fuzz
+
+# Reusable fuzz job with two modes. check: build every target and replay the
+# committed corpus (-runs=0 executes each corpus entry once, no mutation);
+# deterministic, PR-safe, proves targets compile and past crashes stay fixed.
+# discover: time-bounded libFuzzer search per target; crashes upload as
+# workflow artifacts. One nightly Linux job, never part of the main matrix.
+#
+# advisory=true (default) masks discover failures via continue-on-error until
+# the job earns promotion (two consecutive green scheduled weeks). check-mode
+# callers pass advisory=false; corpus replay is a hard gate from day one.
+
+on:
+  workflow_call:
+    inputs:
+      runner:
+        description: "runs-on for the fuzz job. Bare string or JSON array of labels for self-hosted."
+        required: false
+        default: "ubuntu-latest"
+        type: string
+      mode:
+        description: "check = build + corpus replay. discover = time-bounded search."
+        required: true
+        type: string
+      fuzz-dir:
+        description: "Path to the cargo-fuzz crate relative to the repo root."
+        required: false
+        default: "fuzz"
+        type: string
+      max-total-time:
+        description: "Seconds of libFuzzer search per target (discover mode only)."
+        required: false
+        default: 900
+        type: number
+      targets:
+        description: "Space-separated target names. Empty = every target from `cargo fuzz list`."
+        required: false
+        default: ""
+        type: string
+      advisory:
+        description: "true = continue-on-error for discover mode. check mode is never masked."
+        required: false
+        default: true
+        type: boolean
+    secrets:
+      private-dep-token:
+        description: "PAT with read (contents) on private cross-repo cargo git-dep sources. Omit for repos whose deps are all public or crates.io."
+        required: false
+
+env:
+  CARGO_TERM_COLOR: always
+  RUST_BACKTRACE: 1
+
+jobs:
+  fuzz:
+    name: fuzz ${{ inputs.mode }} (nightly)
+    runs-on: ${{ startsWith(inputs.runner, '[') && fromJSON(inputs.runner) || inputs.runner }}
+    continue-on-error: ${{ inputs.mode == 'discover' && inputs.advisory }}
+    env:
+      RUSTUP_TOOLCHAIN: nightly
+    steps:
+      - uses: actions/checkout@v7
+
+      - name: install toolchain
+        uses: dtolnay/rust-toolchain@nightly
+
+      # self-hosted runners keep ~/.cargo and target/ persistent across jobs,
+      # so the GitHub cache API round-trip is pure waste.
+      - uses: Swatinem/rust-cache@v2
+        if: ${{ runner.environment == 'github-hosted' }}
+        with:
+          workspaces: ${{ inputs.fuzz-dir }}
+
+      # self-hosted runners pre-provision cargo-fuzz during VPS bootstrap
+      - name: install cargo-fuzz
+        if: ${{ runner.environment == 'github-hosted' }}
+        uses: taiki-e/install-action@v2
+        with:
+          tool: cargo-fuzz
+
+      # private cross-repo git deps need a credential the runner lacks by
+      # default. job-scoped gitconfig, token never touches a persistent
+      # ~/.gitconfig. no-op when no token is passed (public/crates.io deps).
+      - name: configure private cross-repo dep auth
+        shell: bash
+        env:
+          TOKEN: ${{ secrets.private-dep-token }}
+        run: |
+          set -euo pipefail
+          if [[ -z "${TOKEN:-}" ]]; then
+            echo "no private-dep-token; skipping (public deps only)"
+            exit 0
+          fi
+          cfg="${RUNNER_TEMP}/dep-auth.gitconfig"
+          git config --file "$cfg" \
+            url."https://x-access-token:${TOKEN}@github.com/".insteadOf "https://github.com/"
+          echo "GIT_CONFIG_GLOBAL=$cfg" >> "$GITHUB_ENV"
+          echo "CARGO_NET_GIT_FETCH_WITH_CLI=true" >> "$GITHUB_ENV"
+
+      - name: toolchain evidence
+        shell: bash
+        run: |
+          set -euo pipefail
+          version=$(rustc --version)
+          echo "$version"
+          if [[ "$version" != *nightly* ]]; then
+            echo "::error::expected nightly toolchain, got: $version"
+            exit 1
+          fi
+          cargo fuzz --version
+
+      - name: run targets
+        shell: bash
+        env:
+          MODE: ${{ inputs.mode }}
+          FUZZ_DIR: ${{ inputs.fuzz-dir }}
+          MAX_TOTAL_TIME: ${{ inputs.max-total-time }}
+          TARGETS: ${{ inputs.targets }}
+        run: |
+          set -euo pipefail
+          case "$MODE" in check|discover) ;; *)
+            echo "::error::unknown mode: $MODE (expected check or discover)"; exit 1 ;;
+          esac
+
+          if [[ -z "$TARGETS" ]]; then
+            TARGETS=$(cargo fuzz list --fuzz-dir "$FUZZ_DIR")
+          fi
+          if [[ -z "$TARGETS" ]]; then
+            echo "::error::no fuzz targets found in $FUZZ_DIR"; exit 1
+          fi
+          echo "targets: $TARGETS"
+
+          if [[ "$MODE" == "check" ]]; then
+            cargo fuzz build --fuzz-dir "$FUZZ_DIR"
+            for t in $TARGETS; do
+              echo "::group::replay $t"
+              cargo fuzz run "$t" --fuzz-dir "$FUZZ_DIR" -- -runs=0
+              echo "::endgroup::"
+            done
+            exit 0
+          fi
+
+          # discover: one crashing target must not hide another's findings
+          failed=()
+          for t in $TARGETS; do
+            echo "::group::discover $t (${MAX_TOTAL_TIME}s)"
+            if ! cargo fuzz run "$t" --fuzz-dir "$FUZZ_DIR" -- -max_total_time="$MAX_TOTAL_TIME"; then
+              failed+=("$t")
+            fi
+            echo "::endgroup::"
+          done
+          if [[ ${#failed[@]} -gt 0 ]]; then
+            echo "::error::targets crashed: ${failed[*]} (crash inputs uploaded as artifacts)"
+            exit 1
+          fi
+
+      - name: upload crash artifacts
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: fuzz-artifacts-${{ github.run_id }}
+          path: ${{ inputs.fuzz-dir }}/artifacts/
+          if-no-files-found: ignore
+          retention-days: 30

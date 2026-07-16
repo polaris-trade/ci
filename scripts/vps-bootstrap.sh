@@ -7,7 +7,7 @@
 #   sudo ./vps-bootstrap.sh system             # OS packages only
 #   ./vps-bootstrap.sh rustup                  # rustup + toolchains only (no sudo)
 #   ./vps-bootstrap.sh toolchains              # refresh rustup toolchains only
-#   ./vps-bootstrap.sh tools                   # cargo-nextest, cargo-audit, cargo-hack
+#   ./vps-bootstrap.sh tools                   # cargo-nextest, cargo-audit, cargo-hack, cargo-fuzz
 #   sudo ./vps-bootstrap.sh links              # /usr/local/bin symlinks for systemd PATH
 #   ./vps-bootstrap.sh gc                      # prune target/ dirs, old toolchains
 #
@@ -27,7 +27,7 @@ SUBCMD="${1:-all}"
 FLEET_MSRVS="${FLEET_MSRVS:-1.96.1}"
 EXTRA_TOOLCHAINS="${EXTRA_TOOLCHAINS:-}"
 RUNNER_USER="${RUNNER_USER:-${SUDO_USER:-$(id -un)}}"
-CARGO_TOOLS=("cargo-nextest" "cargo-audit" "cargo-hack")
+CARGO_TOOLS=("cargo-nextest" "cargo-audit" "cargo-hack" "cargo-fuzz")
 
 log() { printf '\033[1;36m[bootstrap]\033[0m %s\n' "$*" >&2; }
 die() { printf '\033[1;31m[bootstrap]\033[0m %s\n' "$*" >&2; exit 1; }
@@ -49,6 +49,7 @@ step_system() {
     gcc gcc-c++ make cmake pkgconf-pkg-config \
     elfutils-libelf-devel zlib-devel numactl-devel \
     libbpf libbpf-devel libxdp libxdp-devel \
+    dpdk dpdk-devel \
     meson ninja-build \
     kernel-devel-"$(uname -r)" \
     policycoreutils-python-utils
@@ -95,8 +96,9 @@ step_toolchains() {
     fi
   done
 
-  # nightly needs rustfmt for the reusable fmt job
-  rustup component add rustfmt --toolchain nightly
+  # nightly needs rustfmt for the reusable fmt job, miri + rust-src for the
+  # reusable miri job (miri builds its interpreter sysroot from rust-src)
+  rustup component add rustfmt miri rust-src --toolchain nightly
 
   log "toolchains ready"
   rustup toolchain list
