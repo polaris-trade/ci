@@ -1,0 +1,108 @@
+name: rust-miri
+
+# Reusable Miri job: runs a caller-selected slice of the test suite under the
+# Miri interpreter on nightly. One Linux job, never part of the compiler/OS
+# matrix. Callers pick packages/test targets via miri-args and keep FFI and
+# socket paths out of the selection; Miri cannot execute them.
+#
+# advisory=true (default) sets continue-on-error so a red run annotates without
+# blocking. Promotion to blocking is a one-line caller change after the job has
+# two consecutive green scheduled weeks.
+
+on:
+  workflow_call:
+    inputs:
+      runner:
+        description: "runs-on for the miri job. Bare string or JSON array of labels for self-hosted."
+        required: false
+        default: "ubuntu-latest"
+        type: string
+      miri-args:
+        description: "Arguments after `cargo miri nextest run`, e.g. '-p md-events' or '-p transport_tokio -p transport_mio --test pool'."
+        required: true
+        type: string
+      miri-flags:
+        description: "Extra MIRIFLAGS for the run (e.g. '-Zmiri-strict-provenance'). Empty = Miri defaults."
+        required: false
+        default: ""
+        type: string
+      advisory:
+        description: "true = continue-on-error (annotate, never block). Flip to false to promote the gate."
+        required: false
+        default: true
+        type: boolean
+    secrets:
+      private-dep-token:
+        description: "PAT with read (contents) on private cross-repo cargo git-dep sources. Omit for repos whose deps are all public or crates.io."
+        required: false
+
+env:
+  CARGO_TERM_COLOR: always
+  RUST_BACKTRACE: 1
+
+jobs:
+  miri:
+    name: miri (nightly)
+    runs-on: ${{ startsWith(inputs.runner, '[') && fromJSON(inputs.runner) || inputs.runner }}
+    continue-on-error: ${{ inputs.advisory }}
+    env:
+      RUSTUP_TOOLCHAIN: nightly
+      MIRIFLAGS: ${{ inputs.miri-flags }}
+    steps:
+      - uses: actions/checkout@v7
+
+      - name: install toolchain
+        uses: dtolnay/rust-toolchain@nightly
+        with:
+          components: miri, rust-src
+
+      # self-hosted runners keep ~/.cargo and target/ persistent across jobs,
+      # so the GitHub cache API round-trip is pure waste.
+      - uses: Swatinem/rust-cache@v2
+        if: ${{ runner.environment == 'github-hosted' }}
+
+      # self-hosted runners pre-provision cargo-nextest during VPS bootstrap
+      - name: install cargo-nextest
+        if: ${{ runner.environment == 'github-hosted' }}
+        uses: taiki-e/install-action@v2
+        with:
+          tool: cargo-nextest
+
+      # private cross-repo git deps need a credential the runner lacks by
+      # default. job-scoped gitconfig, token never touches a persistent
+      # ~/.gitconfig. no-op when no token is passed (public/crates.io deps).
+      - name: configure private cross-repo dep auth
+        shell: bash
+        env:
+          TOKEN: ${{ secrets.private-dep-token }}
+        run: |
+          set -euo pipefail
+          if [[ -z "${TOKEN:-}" ]]; then
+            echo "no private-dep-token; skipping (public deps only)"
+            exit 0
+          fi
+          cfg="${RUNNER_TEMP}/dep-auth.gitconfig"
+          git config --file "$cfg" \
+            url."https://x-access-token:${TOKEN}@github.com/".insteadOf "https://github.com/"
+          echo "GIT_CONFIG_GLOBAL=$cfg" >> "$GITHUB_ENV"
+          echo "CARGO_NET_GIT_FETCH_WITH_CLI=true" >> "$GITHUB_ENV"
+
+      - name: toolchain evidence
+        shell: bash
+        run: |
+          set -euo pipefail
+          version=$(rustc --version)
+          echo "$version"
+          if [[ "$version" != *nightly* ]]; then
+            echo "::error::expected nightly toolchain, got: $version"
+            exit 1
+          fi
+          cargo miri --version
+
+      # idempotent; builds the interpreter sysroot once so the run step's log
+      # starts at the actual test output
+      - name: miri setup
+        run: cargo miri setup
+
+      - name: cargo miri nextest
+        run: cargo miri nextest run ${{ inputs.miri-args }}
