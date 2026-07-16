@@ -1,10 +1,25 @@
 name: rust-ci
 
-# Reusable Rust CI: fmt, clippy, cargo-nextest across a 3-OS × N-toolchain matrix.
-# Toolchain matrix is derived at run-time from the live rust-lang stable channel:
-#   [stable-N, stable-N+1, ..., stable-1, stable, nightly]
-# where N = `msrv-window` (default 3). No manual pin, no rust-toolchain.toml
-# dependency. Central bumps to this workflow ship on next @ref resolution.
+# Reusable Rust CI. Toolchain axis is exactly [declared MSRV, stable, nightly]:
+#   msrv    - module's declared floor, read from rust-toolchain.toml and checked
+#             against every declared Cargo.toml rust-version. Linux only.
+#             Runs cargo check --all-targets + nextest.
+#   stable  - tests + doctests, crossed with os-matrix. Clippy runs once in its
+#             own stable Linux job, not per cell.
+#   nightly - forward-compat probe. Linux only, push/schedule only, and
+#             continue-on-error until two weeks green on main (run badge stays
+#             green either way; watch cell logs before flipping).
+# No network fetch for resolution: msrv comes from the repo, stable resolves via
+# local rustup. Every cargo job pins its compiler through RUSTUP_TOOLCHAIN and
+# prints rustc --version as evidence. A bare `cargo` would silently build on the
+# repo's rust-toolchain.toml pin instead of the matrix entry (the action only
+# sets the rustup default, and the pin beats the default).
+#
+# Jobs per caller invocation (aux = prepare + fmt + clippy):
+#   public PR     3 aux + 4 cells   (was 9)
+#   public push   3 aux + 5 cells   (was 18)
+#   private PR    3 aux + 2 cells   (was 5)
+#   private push  3 aux + 3 cells   (was 8)
 
 on:
   workflow_call:
@@ -15,32 +30,22 @@ on:
         default: ""
         type: string
       run-ignored:
-        description: "Also run cargo nextest --run-ignored ignored-only (integration tests)."
+        description: "Also run cargo nextest --run-ignored ignored-only (integration tests). Stable cells only."
         required: false
         default: false
         type: boolean
       os-matrix:
-        description: "JSON array of runner labels. Default covers Linux, macOS, Windows."
+        description: "JSON array of runner labels for the stable test cells. First entry must be Linux; msrv/nightly/doctests ride it. Default covers Linux, macOS, Windows."
         required: false
         default: '["ubuntu-latest", "macos-latest", "windows-latest"]'
         type: string
       extra-toolchains:
-        description: "JSON array of extra toolchains added to the rolling window (e.g. [\"beta\"])."
+        description: "JSON array of extra toolchains (e.g. [\"beta\"]). Each runs one Linux cell, evidence printed, no role assert."
         required: false
         default: '[]'
         type: string
-      msrv-window:
-        description: "How many stable releases below latest to test on push (main). Default 3 = MSRV of stable-3."
-        required: false
-        default: 3
-        type: number
-      pr-msrv-window:
-        description: "MSRV window on pull_request events. Default 0 = [stable, nightly] only, for fast PR feedback. Raise to widen PR coverage."
-        required: false
-        default: 0
-        type: number
       runner-linux:
-        description: "runs-on for internal Linux-only jobs (fmt, changes, resolve-toolchains). Bare string or JSON array of labels for self-hosted. Test matrix uses os-matrix independently."
+        description: "runs-on for internal Linux-only jobs (prepare, fmt, clippy). Bare string or JSON array of labels for self-hosted. Test matrix uses os-matrix independently."
         required: false
         default: "ubuntu-latest"
         type: string
@@ -61,20 +66,24 @@ env:
 # Cancel in-flight CI on a ref when a new commit lands on that same ref.
 # main pushes preserved (never canceled): each main push kicks a fresh matrix
 # and the previous one runs to completion, so release-please sees the last one.
-# PR branches cancel — force-pushes + squash merges reclaim ~5-10 min each.
+# PR branches cancel: force-pushes + squash merges reclaim ~5-10 min each.
 concurrency:
   group: rust-ci-${{ github.workflow }}-${{ github.ref }}-${{ inputs.concurrency-key }}
   cancel-in-progress: ${{ github.ref != 'refs/heads/main' }}
 
 jobs:
-  changes:
-    # Gate downstream jobs on whether Rust-relevant files actually changed.
-    # Skipped jobs report success, so branch-protection required checks
-    # still pass on non-Rust PRs (docs, workflow tweaks, config).
-    name: detect changes
+  prepare:
+    # Two duties, one aux job: gate downstream jobs on whether Rust-relevant
+    # files changed (skipped jobs report success, so branch-protection required
+    # checks still pass on non-Rust PRs), and resolve the toolchain matrix from
+    # the repo's own declarations.
+    name: prepare
     runs-on: ${{ startsWith(inputs.runner-linux, '[') && fromJSON(inputs.runner-linux) || inputs.runner-linux }}
     outputs:
       rust: ${{ steps.filter.outputs.rust }}
+      msrv: ${{ steps.toolchains.outputs.msrv }}
+      stable-version: ${{ steps.toolchains.outputs.stable-version }}
+      matrix: ${{ steps.toolchains.outputs.matrix }}
     steps:
       - uses: actions/checkout@v7
       - uses: dorny/paths-filter@v3
@@ -92,65 +101,70 @@ jobs:
               - 'deny.toml'
               - '.github/workflows/**'
 
-  resolve-toolchains:
-    name: resolve toolchain matrix (stable-N..stable, nightly)
-    needs: changes
-    if: ${{ needs.changes.outputs.rust == 'true' }}
-    runs-on: ${{ startsWith(inputs.runner-linux, '[') && fromJSON(inputs.runner-linux) || inputs.runner-linux }}
-    outputs:
-      msrv: ${{ steps.matrix.outputs.msrv }}
-      toolchains: ${{ steps.matrix.outputs.toolchains }}
-    steps:
-      - name: fetch current stable + compute matrix
-        id: matrix
+      - name: resolve toolchain matrix (msrv, stable, nightly)
+        id: toolchains
+        if: ${{ steps.filter.outputs.rust == 'true' }}
         shell: bash
         env:
-          MSRV_WINDOW: ${{ inputs.msrv-window }}
-          PR_WINDOW: ${{ inputs.pr-msrv-window }}
-          EVENT: ${{ github.event_name }}
+          OS_MATRIX: ${{ inputs.os-matrix }}
           EXTRA: ${{ inputs.extra-toolchains }}
+          EVENT: ${{ github.event_name }}
         run: |
           set -euo pipefail
-          # Fast PRs: pull_request uses the narrow pr-msrv-window (default 0 ->
-          # [stable, nightly]); push (main) uses the full rolling msrv-window.
-          # Select in bash, not a GHA `&& ||` expression, because window 0 is
-          # falsy there and would silently fall through to the push value.
-          if [ "$EVENT" = "pull_request" ]; then WINDOW="$PR_WINDOW"; else WINDOW="$MSRV_WINDOW"; fi
-          # Live stable version from the rust-lang release channel manifest.
-          # Manifest has `version = ` under many `[pkg.*]` sections; the one that
-          # matters is `[pkg.rust]`. Anchor on that section header.
-          # Save to disk first: awk's `exit` closes the pipe early, which turns
-          # `curl -o -` into a broken-pipe (exit 23) under `pipefail`.
-          curl -sSL -o channel.toml https://static.rust-lang.org/dist/channel-rust-stable.toml
-          STABLE=$(awk '/^\[pkg\.rust\]$/{f=1; next} f && /^version = /{ print; exit }' channel.toml \
-            | sed -E 's/.*"([0-9]+\.[0-9]+\.[0-9]+).*/\1/')
-          rm -f channel.toml
-          if [[ -z "$STABLE" ]]; then
-            echo "::error::could not parse current stable from channel-rust-stable.toml"
+          # Declared floor: rust-toolchain.toml channel, must be concrete.
+          MSRV=$(awk -F'"' '/^channel[[:space:]]*=/ { print $2 }' rust-toolchain.toml)
+          if [[ ! "$MSRV" =~ ^[0-9]+\.[0-9]+(\.[0-9]+)?$ ]]; then
+            echo "::error::rust-toolchain.toml channel must be a concrete version, got '${MSRV:-missing}'"
             exit 1
           fi
-          MAJOR=$(echo "$STABLE" | cut -d. -f1)
-          MINOR=$(echo "$STABLE" | cut -d. -f2)
-          MSRV_MINOR=$((MINOR - WINDOW))
-          MSRV="${MAJOR}.${MSRV_MINOR}"
-          echo "stable=$STABLE msrv=$MSRV (window=$WINDOW)"
-
-          # Build rolling matrix: [msrv, msrv+1, ..., stable-1, stable, nightly].
-          entries=()
-          for i in $(seq 0 "$WINDOW"); do
-            entries+=("\"${MAJOR}.$((MSRV_MINOR + i))\"")
+          # Manifest agreement: every DECLARED rust-version must equal the pin.
+          # Generated crates (workspace-hack) declare none; null entries exempt.
+          # Stable toolchain pinned for the metadata call: preinstalled on both
+          # runner kinds, and the repo pin may not be installed yet.
+          mapfile -t DECLARED < <(RUSTUP_TOOLCHAIN=stable cargo metadata --no-deps --format-version 1 \
+            | jq -r '[.packages[].rust_version | select(. != null)] | unique | .[]')
+          if [[ ${#DECLARED[@]} -eq 0 ]]; then
+            echo "::error::no package declares rust-version in Cargo.toml"
+            exit 1
+          fi
+          for v in "${DECLARED[@]}"; do
+            if [[ "$v" != "$MSRV" ]]; then
+              echo "::error::Cargo.toml rust-version '$v' disagrees with rust-toolchain.toml channel '$MSRV'"
+              exit 1
+            fi
           done
-          entries+=("\"nightly\"")
-          BASE="[$(IFS=,; echo "${entries[*]}")]"
-          COMBINED=$(jq -c --argjson base "$BASE" --argjson extra "$EXTRA" -n '$base + $extra | unique')
-          echo "toolchains=$COMBINED"
-          echo "msrv=$MSRV" >> "$GITHUB_OUTPUT"
-          echo "toolchains=$COMBINED" >> "$GITHUB_OUTPUT"
+          STABLE=$(RUSTUP_TOOLCHAIN=stable rustc --version | awk '{ print $2 }')
+          echo "msrv=$MSRV stable=$STABLE event=$EVENT"
+          # Include-list matrix. Stable crossed with os-matrix; doctests ride
+          # the first entry (Linux by caller convention). msrv and nightly run
+          # on that first entry only; nightly skips pull requests.
+          # msrv cell is ALWAYS emitted, never deduped against stable: the
+          # local stable used for comparison can lag the live release (seen
+          # in the wild: runner stable 1.96.1 while cells installed 1.97.1),
+          # and a stale compare silently drops msrv coverage. One redundant
+          # Linux cell while msrv == live stable is the accepted price.
+          MATRIX=$(jq -cn \
+            --argjson os "$OS_MATRIX" --argjson extra "$EXTRA" \
+            --arg msrv "$MSRV" --arg stable "$STABLE" --arg event "$EVENT" '
+            ([$os[] | {role: "stable", toolchain: "stable", os: .}]
+             | .[0] += {doctests: true}) as $stable_cells
+            | [{role: "msrv", toolchain: $msrv, os: $os[0]}] as $msrv_cell
+            | (if $event != "pull_request"
+                 then [{role: "nightly", toolchain: "nightly", os: $os[0]}]
+                 else [] end) as $nightly_cell
+            | ([$extra[] | {role: "extra", toolchain: ., os: $os[0]}]) as $extra_cells
+            | {include: ($stable_cells + $msrv_cell + $nightly_cell + $extra_cells)}')
+          echo "matrix=$MATRIX"
+          {
+            echo "msrv=$MSRV"
+            echo "stable-version=$STABLE"
+            echo "matrix=$MATRIX"
+          } >> "$GITHUB_OUTPUT"
 
   fmt:
     name: rustfmt
-    needs: changes
-    if: ${{ needs.changes.outputs.rust == 'true' }}
+    needs: prepare
+    if: ${{ needs.prepare.outputs.rust == 'true' }}
     runs-on: ${{ startsWith(inputs.runner-linux, '[') && fromJSON(inputs.runner-linux) || inputs.runner-linux }}
     steps:
       - uses: actions/checkout@v7
@@ -181,16 +195,86 @@ jobs:
       # pinned stable toolchain instead.
       - run: cargo +nightly fmt --all -- --check
 
+  clippy:
+    # Once, on one stable Linux runner. Lint availability and behavior change
+    # across toolchains; repeating clippy per matrix cell multiplies work
+    # without adding signal.
+    name: clippy
+    needs: prepare
+    if: ${{ needs.prepare.outputs.rust == 'true' }}
+    runs-on: ${{ startsWith(inputs.runner-linux, '[') && fromJSON(inputs.runner-linux) || inputs.runner-linux }}
+    env:
+      RUSTUP_TOOLCHAIN: stable
+    steps:
+      - uses: actions/checkout@v7
+
+      - name: cache rustup toolchain
+        if: ${{ runner.environment == 'github-hosted' }}
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.rustup/toolchains/stable-*
+            ~/.rustup/update-hashes/stable-*
+          key: rustup-clippy-stable
+          restore-keys: |
+            rustup-clippy-
+
+      - name: install toolchain
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          components: clippy
+
+      - uses: Swatinem/rust-cache@v2
+        if: ${{ runner.environment == 'github-hosted' }}
+        with:
+          key: clippy-stable
+
+      - name: configure private cross-repo dep auth
+        shell: bash
+        env:
+          TOKEN: ${{ secrets.private-dep-token }}
+        run: |
+          set -euo pipefail
+          if [[ -z "${TOKEN:-}" ]]; then
+            echo "no private-dep-token; skipping (public deps only)"
+            exit 0
+          fi
+          cfg="${RUNNER_TEMP}/dep-auth.gitconfig"
+          git config --file "$cfg" \
+            url."https://x-access-token:${TOKEN}@github.com/".insteadOf "https://github.com/"
+          echo "GIT_CONFIG_GLOBAL=$cfg" >> "$GITHUB_ENV"
+          echo "CARGO_NET_GIT_FETCH_WITH_CLI=true" >> "$GITHUB_ENV"
+
+      - name: toolchain evidence
+        shell: bash
+        run: |
+          set -euo pipefail
+          V=$(rustc --version)
+          echo "$V"
+          if [[ "$V" == *nightly* ]]; then
+            echo "::error::clippy must run on stable, got $V"
+            exit 1
+          fi
+
+      - name: clippy
+        run: cargo clippy --workspace --all-targets ${{ inputs.workspace-args }} -- -D warnings
+
   test:
     name: ${{ (matrix.os == 'macos-latest' || contains(matrix.os, 'macos')) && 'mac' || (matrix.os == 'windows-latest' || contains(matrix.os, 'windows')) && 'win' || 'linux' }}-${{ matrix.toolchain }}
-    needs: [changes, resolve-toolchains]
-    if: ${{ needs.changes.outputs.rust == 'true' }}
+    needs: prepare
+    if: ${{ needs.prepare.outputs.rust == 'true' }}
     runs-on: ${{ matrix.os }}
+    # Nightly probes real forward-compat for the first time; non-blocking until
+    # two weeks green on main, then remove this line. The run badge stays green
+    # while it is set: check the nightly cell logs, not the badge.
+    continue-on-error: ${{ matrix.role == 'nightly' }}
     strategy:
       fail-fast: false
-      matrix:
-        os: ${{ fromJSON(inputs.os-matrix) }}
-        toolchain: ${{ fromJSON(needs.resolve-toolchains.outputs.toolchains) }}
+      matrix: ${{ fromJSON(needs.prepare.outputs.matrix) }}
+    env:
+      # Beats the repo's rust-toolchain.toml pin for every cargo invocation in
+      # this job. Without it every cell silently builds on the pin.
+      RUSTUP_TOOLCHAIN: ${{ matrix.toolchain }}
     steps:
       - uses: actions/checkout@v7
 
@@ -216,11 +300,11 @@ jobs:
           restore-keys: |
             rustup-${{ matrix.os }}-
 
+      # Env selects but does not install; keep the install step.
       - name: install toolchain
         uses: dtolnay/rust-toolchain@master
         with:
           toolchain: ${{ matrix.toolchain }}
-          components: clippy
 
       - uses: Swatinem/rust-cache@v2
         if: ${{ runner.environment == 'github-hosted' }}
@@ -257,15 +341,45 @@ jobs:
           echo "GIT_CONFIG_GLOBAL=$cfg" >> "$GITHUB_ENV"
           echo "CARGO_NET_GIT_FETCH_WITH_CLI=true" >> "$GITHUB_ENV"
 
-      - name: clippy
-        run: cargo clippy --workspace --all-targets ${{ inputs.workspace-args }} -- -D warnings
+      # Proof the cell runs the compiler its matrix label claims. Stable skips
+      # an exact match against prepare's resolved version on purpose: the
+      # install step may pull a newer stable right after a Rust release.
+      - name: toolchain evidence
+        shell: bash
+        env:
+          ROLE: ${{ matrix.role }}
+          MSRV: ${{ needs.prepare.outputs.msrv }}
+          STABLE: ${{ needs.prepare.outputs.stable-version }}
+        run: |
+          set -euo pipefail
+          V=$(rustc --version)
+          echo "$V"
+          case "$ROLE" in
+            msrv)
+              [[ "$V" == *"$MSRV"* ]] || { echo "::error::expected msrv $MSRV, got $V"; exit 1; } ;;
+            nightly)
+              [[ "$V" == *nightly* ]] || { echo "::error::expected nightly, got $V"; exit 1; } ;;
+            stable)
+              [[ "$V" != *nightly* ]] || { echo "::error::expected stable, got $V"; exit 1; }
+              if [[ "$MSRV" != "$STABLE" && "$V" == *"$MSRV"* ]]; then
+                echo "::error::stable cell resolved the msrv pin $MSRV; RUSTUP_TOOLCHAIN not applied"
+                exit 1
+              fi
+              ;;
+            *) : ;;
+          esac
+
+      - name: check all targets (msrv)
+        if: ${{ matrix.role == 'msrv' }}
+        run: cargo check --workspace --all-targets ${{ inputs.workspace-args }}
 
       - name: nextest run
         run: cargo nextest run --workspace --no-fail-fast ${{ inputs.workspace-args }}
 
       - name: nextest run --ignored
-        if: ${{ inputs.run-ignored }}
+        if: ${{ inputs.run-ignored && matrix.role == 'stable' }}
         run: cargo nextest run --workspace --no-fail-fast --run-ignored ignored-only ${{ inputs.workspace-args }}
 
       - name: doctests
+        if: ${{ matrix.doctests }}
         run: cargo test --workspace --doc ${{ inputs.workspace-args }}

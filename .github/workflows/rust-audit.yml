@@ -1,0 +1,82 @@
+name: rust-audit
+
+# Reusable RustSec advisory scan for a calling module's committed Cargo.lock.
+# cargo-audit default exit behavior is the gate: nonzero only on
+# vulnerability advisories. Unmaintained/unsound/yanked findings print as
+# warnings and do not fail the job. No --deny flags here, keep that default.
+
+on:
+  workflow_call:
+    inputs:
+      runner:
+        description: "runs-on value. Bare string (ubuntu-latest) or JSON array of labels for self-hosted."
+        required: false
+        default: "ubuntu-latest"
+        type: string
+
+jobs:
+  audit:
+    name: cargo audit
+    runs-on: ${{ startsWith(inputs.runner, '[') && fromJSON(inputs.runner) || inputs.runner }}
+    steps:
+      - uses: actions/checkout@v7
+
+      # self-hosted runners pre-provision cargo-audit during VPS bootstrap.
+      # github-hosted runners install it fresh here each run.
+      - name: install cargo-audit
+        if: ${{ runner.environment == 'github-hosted' }}
+        uses: taiki-e/install-action@v2
+        with:
+          tool: cargo-audit
+
+      # tee keeps a plain-text copy for the step summary while still
+      # streaming to the live job log. set -o pipefail makes the step exit
+      # nonzero when cargo audit does, even though tee is last in the pipe
+      # and would otherwise swallow that exit code. --color never keeps
+      # ANSI escapes out of the markdown code fence below.
+      - name: run cargo audit
+        shell: bash
+        run: |
+          set -o pipefail
+          cargo audit --color never 2>&1 | tee audit.log
+
+      # always(): summary must show what ran even when the vulnerability
+      # gate above failed the job.
+      - name: publish audit output to job summary
+        if: always()
+        shell: bash
+        run: |
+          {
+            echo "## cargo audit"
+            echo
+            echo '```'
+            if [[ -f audit.log ]]; then
+              cat audit.log
+            else
+              echo "audit.log missing, cargo audit step did not run to completion"
+            fi
+            echo '```'
+          } >> "$GITHUB_STEP_SUMMARY"
+
+      # ignores live in the module's own audit.toml [advisories] table.
+      # surface them so they stay visible instead of silently accumulating.
+      - name: surface active advisory ignores
+        if: always()
+        shell: bash
+        run: |
+          if [[ ! -f audit.toml ]]; then
+            echo "no audit.toml at repo root, no advisory ignores configured"
+            exit 0
+          fi
+          section=$(awk '/^\[advisories\]/{p=1} /^\[/ && !/^\[advisories\]/{p=0} p' audit.toml)
+          {
+            echo "## Active advisory ignores"
+            echo
+            if [[ -z "$section" ]]; then
+              echo "audit.toml present, no [advisories] section"
+            else
+              echo '```toml'
+              echo "$section"
+              echo '```'
+            fi
+          } >> "$GITHUB_STEP_SUMMARY"

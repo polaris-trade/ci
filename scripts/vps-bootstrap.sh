@@ -7,22 +7,27 @@
 #   sudo ./vps-bootstrap.sh system             # OS packages only
 #   ./vps-bootstrap.sh rustup                  # rustup + toolchains only (no sudo)
 #   ./vps-bootstrap.sh toolchains              # refresh rustup toolchains only
-#   ./vps-bootstrap.sh tools                   # cargo-nextest, other CLI tools
+#   ./vps-bootstrap.sh tools                   # cargo-nextest, cargo-audit, cargo-hack
+#   sudo ./vps-bootstrap.sh links              # /usr/local/bin symlinks for systemd PATH
 #   ./vps-bootstrap.sh gc                      # prune target/ dirs, old toolchains
 #
+# `all` runs: system, rustup, toolchains, tools, links, gc.
+#
 # Tuning:
-#   MSRV_WINDOW=3        rolling stable-N..stable window (default 3, matches rust-ci)
+#   FLEET_MSRVS="1.96.1" space-separated declared MSRVs to provision (default "1.96.1")
 #   EXTRA_TOOLCHAINS=""  space-separated extra pins, e.g. "beta 1.90.0"
-#   RUNNER_USER=aurora   user the runner runs as (owner of ~/.cargo, ~/.rustup)
+#   RUNNER_USER=<name>   user the runner runs as (owner of ~/.cargo, ~/.rustup);
+#                        defaults to the sudo caller, else the current user
 #
 # Prereqs: AlmaLinux 9 / RHEL 9 family. Adjust pkg step for other distros.
 
 set -euo pipefail
 
 SUBCMD="${1:-all}"
-MSRV_WINDOW="${MSRV_WINDOW:-3}"
+FLEET_MSRVS="${FLEET_MSRVS:-1.96.1}"
 EXTRA_TOOLCHAINS="${EXTRA_TOOLCHAINS:-}"
-RUNNER_USER="${RUNNER_USER:-aurora}"
+RUNNER_USER="${RUNNER_USER:-${SUDO_USER:-$(id -un)}}"
+CARGO_TOOLS=("cargo-nextest" "cargo-audit" "cargo-hack")
 
 log() { printf '\033[1;36m[bootstrap]\033[0m %s\n' "$*" >&2; }
 die() { printf '\033[1;31m[bootstrap]\033[0m %s\n' "$*" >&2; exit 1; }
@@ -42,7 +47,7 @@ step_system() {
     git curl jq tar gzip zstd \
     clang lld llvm \
     gcc gcc-c++ make cmake pkgconf-pkg-config \
-    libelf-devel zlib-devel numactl-devel \
+    elfutils-libelf-devel zlib-devel numactl-devel \
     libbpf libbpf-devel libxdp libxdp-devel \
     meson ninja-build \
     kernel-devel-"$(uname -r)" \
@@ -65,30 +70,20 @@ step_rustup() {
   fi
 }
 
-# ---- toolchains (msrv..stable window + nightly) ----
+# ---- toolchains (stable + nightly + declared fleet MSRVs) ----
 step_toolchains() {
   require_user "toolchains"
   # shellcheck disable=SC1091
   . "$HOME/.cargo/env"
 
-  local stable major minor msrv_minor
-  stable=$(curl -sSL https://static.rust-lang.org/dist/channel-rust-stable.toml \
-    | awk '/^\[pkg\.rust\]$/{f=1; next} f && /^version = /{ print; exit }' \
-    | sed -E 's/.*"([0-9]+\.[0-9]+\.[0-9]+).*/\1/')
-  [ -n "$stable" ] || die "could not parse current stable version"
-  major=$(echo "$stable" | cut -d. -f1)
-  minor=$(echo "$stable" | cut -d. -f2)
-  msrv_minor=$((minor - MSRV_WINDOW))
-  log "stable=$stable  msrv window=${major}.${msrv_minor}..${major}.${minor}"
-
-  local toolchains=()
-  for i in $(seq 0 "$MSRV_WINDOW"); do
-    toolchains+=("${major}.$((msrv_minor + i))")
+  local toolchains=("stable" "nightly")
+  for msrv in $FLEET_MSRVS; do
+    toolchains+=("$msrv")
   done
-  toolchains+=("nightly")
   for extra in $EXTRA_TOOLCHAINS; do
     toolchains+=("$extra")
   done
+  log "provisioning toolchains: ${toolchains[*]}"
 
   for tc in "${toolchains[@]}"; do
     if rustup toolchain list | grep -q "^$tc-"; then
@@ -113,8 +108,8 @@ step_tools() {
   # shellcheck disable=SC1091
   . "$HOME/.cargo/env"
 
-  local tools=("cargo-nextest")
-  for t in "${tools[@]}"; do
+  local t
+  for t in "${CARGO_TOOLS[@]}"; do
     if command -v "$t" >/dev/null 2>&1; then
       log "  $t present ($($t --version 2>&1 | head -1))"
     else
@@ -122,12 +117,25 @@ step_tools() {
       cargo install "$t" --locked
     fi
   done
+}
 
-  # expose cargo-nextest at /usr/local/bin so systemd-launched runners find it
-  # without depending on the runner user's PATH.
-  if [ -x "$HOME/.cargo/bin/cargo-nextest" ]; then
-    sudo ln -sf "$HOME/.cargo/bin/cargo-nextest" /usr/local/bin/cargo-nextest
-  fi
+# ---- /usr/local/bin symlinks ----
+step_links() {
+  require_root "links"
+  # systemd-launched runner processes never see the runner user's PATH;
+  # expose cargo tools at /usr/local/bin. Root-owned step: a non-root step
+  # calling sudo dies without a tty, which is exactly how `all` runs.
+  local home t
+  home=$(getent passwd "$RUNNER_USER" | cut -d: -f6)
+  [ -n "$home" ] || die "cannot resolve home dir for ${RUNNER_USER}"
+  for t in "${CARGO_TOOLS[@]}"; do
+    if [ -x "$home/.cargo/bin/$t" ]; then
+      ln -sf "$home/.cargo/bin/$t" "/usr/local/bin/$t"
+      log "  linked /usr/local/bin/$t"
+    else
+      log "  $t missing under ${home}/.cargo/bin, skipped"
+    fi
+  done
 }
 
 # ---- garbage collection ----
@@ -135,17 +143,45 @@ step_gc() {
   require_user "gc"
   log "pruning runner target/ and toolchain leftovers"
   find /opt/actions-runner-*/_work -type d -name target -prune -exec du -sh {} \; 2>/dev/null || true
-  read -r -p "remove all runner target/ dirs? [y/N] " ans
+  # non-tty (the `all` chain): keep target dirs, prompt would die under set -e
+  local ans=N
+  if [ -t 0 ]; then
+    read -r -p "remove all runner target/ dirs? [y/N] " ans || ans=N
+  else
+    log "non-interactive run: keeping runner target/ dirs"
+  fi
   if [ "${ans:-N}" = "y" ] || [ "${ans:-N}" = "Y" ]; then
     find /opt/actions-runner-*/_work -type d -name target -prune -exec rm -rf {} + 2>/dev/null || true
     log "target dirs removed"
   fi
   # shellcheck disable=SC1091
   . "$HOME/.cargo/env"
-  # drop toolchains outside our msrv window
-  local keep_pattern
-  keep_pattern=$(rustup toolchain list | awk '{print $1}' | tr '\n' '|' | sed 's/|$//')
-  log "keeping toolchains: $keep_pattern"
+
+  # drop installed toolchains outside the configured fleet set
+  local keep=("stable" "nightly")
+  for msrv in $FLEET_MSRVS; do
+    keep+=("$msrv")
+  done
+  for extra in $EXTRA_TOOLCHAINS; do
+    keep+=("$extra")
+  done
+  log "keeping toolchains: ${keep[*]}"
+
+  local tc keep_tc matched
+  while IFS= read -r tc; do
+    [ -n "$tc" ] || continue
+    matched=0
+    for keep_tc in "${keep[@]}"; do
+      case "$tc" in
+        "$keep_tc"-*) matched=1; break ;;
+      esac
+    done
+    if [ "$matched" -eq 0 ]; then
+      log "  removing stale toolchain $tc"
+      rustup toolchain uninstall "$tc"
+    fi
+  done < <(rustup toolchain list | awk '{print $1}')
+
   du -sh "$HOME/.rustup/toolchains/" 2>/dev/null || true
 }
 
@@ -153,15 +189,18 @@ case "$SUBCMD" in
   all)
     require_root "all (uses sudo for system step)"
     step_system
-    sudo -u "$RUNNER_USER" -H bash -c "MSRV_WINDOW=$MSRV_WINDOW EXTRA_TOOLCHAINS='$EXTRA_TOOLCHAINS' RUNNER_USER=$RUNNER_USER $(realpath "$0") rustup"
-    sudo -u "$RUNNER_USER" -H bash -c "MSRV_WINDOW=$MSRV_WINDOW EXTRA_TOOLCHAINS='$EXTRA_TOOLCHAINS' RUNNER_USER=$RUNNER_USER $(realpath "$0") toolchains"
-    sudo -u "$RUNNER_USER" -H bash -c "MSRV_WINDOW=$MSRV_WINDOW EXTRA_TOOLCHAINS='$EXTRA_TOOLCHAINS' RUNNER_USER=$RUNNER_USER $(realpath "$0") tools"
+    sudo -u "$RUNNER_USER" -H bash -c "FLEET_MSRVS='$FLEET_MSRVS' EXTRA_TOOLCHAINS='$EXTRA_TOOLCHAINS' RUNNER_USER=$RUNNER_USER $(realpath "$0") rustup"
+    sudo -u "$RUNNER_USER" -H bash -c "FLEET_MSRVS='$FLEET_MSRVS' EXTRA_TOOLCHAINS='$EXTRA_TOOLCHAINS' RUNNER_USER=$RUNNER_USER $(realpath "$0") toolchains"
+    sudo -u "$RUNNER_USER" -H bash -c "FLEET_MSRVS='$FLEET_MSRVS' EXTRA_TOOLCHAINS='$EXTRA_TOOLCHAINS' RUNNER_USER=$RUNNER_USER $(realpath "$0") tools"
+    step_links
+    sudo -u "$RUNNER_USER" -H bash -c "FLEET_MSRVS='$FLEET_MSRVS' EXTRA_TOOLCHAINS='$EXTRA_TOOLCHAINS' RUNNER_USER=$RUNNER_USER $(realpath "$0") gc"
     log "bootstrap complete"
     ;;
   system)     step_system ;;
   rustup)     step_rustup ;;
   toolchains) step_toolchains ;;
   tools)      step_tools ;;
+  links)      step_links ;;
   gc)         step_gc ;;
   *)          die "unknown subcommand: $SUBCMD (all|system|rustup|toolchains|tools|gc)" ;;
 esac

@@ -1,0 +1,109 @@
+name: rust-features
+
+# Reusable feature-configuration check: cargo-hack over a feature powerset plus
+# arbitrary extra commands, one stable-Linux job per caller. No toolchain
+# matrix; feature combos are a compile-shape question, not a platform one.
+
+on:
+  workflow_call:
+    inputs:
+      runner:
+        description: "runs-on for the features job. Bare string or JSON array of labels for self-hosted."
+        required: false
+        default: "ubuntu-latest"
+        type: string
+      hack-args:
+        description: "Flags passed to cargo-hack before check, e.g. '-p client_soupbintcp --feature-powerset'. Step skipped when empty."
+        required: false
+        default: ""
+        type: string
+      extra-commands:
+        description: "Multiline shell commands run after the hack check (e.g. --all-features check/test lines). Skipped when empty."
+        required: false
+        default: ""
+        type: string
+      install-nextest:
+        description: "Install cargo-nextest on github-hosted runners. Set true when extra-commands runs nextest."
+        required: false
+        default: false
+        type: boolean
+    secrets:
+      private-dep-token:
+        description: "PAT with read (contents) on private cross-repo cargo git-dep sources. Omit for repos whose deps are all public or crates.io."
+        required: false
+
+env:
+  CARGO_TERM_COLOR: always
+  RUSTFLAGS: "-D warnings"
+  RUST_BACKTRACE: 1
+
+jobs:
+  features:
+    name: feature check (stable)
+    runs-on: ${{ startsWith(inputs.runner, '[') && fromJSON(inputs.runner) || inputs.runner }}
+    env:
+      RUSTUP_TOOLCHAIN: stable
+    steps:
+      - uses: actions/checkout@v7
+
+      - name: install toolchain
+        uses: dtolnay/rust-toolchain@stable
+
+      # self-hosted runners keep ~/.cargo and target/ persistent across jobs,
+      # so the GitHub cache API round-trip is pure waste.
+      - uses: Swatinem/rust-cache@v2
+        if: ${{ runner.environment == 'github-hosted' }}
+
+      # self-hosted runners pre-provision cargo-hack during VPS bootstrap
+      - name: install cargo-hack
+        if: ${{ runner.environment == 'github-hosted' }}
+        uses: taiki-e/install-action@v2
+        with:
+          tool: cargo-hack
+
+      - name: install cargo-nextest
+        if: ${{ runner.environment == 'github-hosted' && inputs.install-nextest }}
+        uses: taiki-e/install-action@v2
+        with:
+          tool: cargo-nextest
+
+      # private cross-repo git deps need a credential the runner lacks by
+      # default. job-scoped gitconfig, token never touches a persistent
+      # ~/.gitconfig. no-op when no token is passed (public/crates.io deps).
+      - name: configure private cross-repo dep auth
+        shell: bash
+        env:
+          TOKEN: ${{ secrets.private-dep-token }}
+        run: |
+          set -euo pipefail
+          if [[ -z "${TOKEN:-}" ]]; then
+            echo "no private-dep-token; skipping (public deps only)"
+            exit 0
+          fi
+          cfg="${RUNNER_TEMP}/dep-auth.gitconfig"
+          git config --file "$cfg" \
+            url."https://x-access-token:${TOKEN}@github.com/".insteadOf "https://github.com/"
+          echo "GIT_CONFIG_GLOBAL=$cfg" >> "$GITHUB_ENV"
+          echo "CARGO_NET_GIT_FETCH_WITH_CLI=true" >> "$GITHUB_ENV"
+
+      - name: rustc version evidence
+        shell: bash
+        run: |
+          set -euo pipefail
+          version=$(rustc --version)
+          echo "$version"
+          if [[ "$version" == *nightly* ]]; then
+            echo "::error::expected stable toolchain, got nightly: $version"
+            exit 1
+          fi
+
+      - name: cargo hack check
+        if: ${{ inputs.hack-args != '' }}
+        run: cargo hack ${{ inputs.hack-args }} check
+
+      - name: extra commands
+        if: ${{ inputs.extra-commands != '' }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          ${{ inputs.extra-commands }}
