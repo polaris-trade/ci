@@ -58,9 +58,13 @@ jobs:
     continue-on-error: ${{ inputs.mode == 'discover' && inputs.advisory }}
     env:
       RUSTUP_TOOLCHAIN: nightly
-      # neutralize any runner-level musl default: libFuzzer's sanitizer needs a
-      # dynamic-libc target, and musl links libc statically
+      # prefer a dynamic-libc target when the runner defaults to musl
       CARGO_BUILD_TARGET: x86_64-unknown-linux-gnu
+      # cargo-fuzz prepends this before its sancov flags. -crt-static disables
+      # the musl target's static-crt default, which the sanitizer cannot use;
+      # no-op on a gnu (already dynamic) build. Fixes the sanitizer build on
+      # whichever target the runner ends up choosing.
+      RUSTFLAGS: "-Ctarget-feature=-crt-static"
     steps:
       - uses: actions/checkout@v7
 
