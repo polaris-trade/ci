@@ -99,10 +99,11 @@ jobs:
           fi
           cargo miri --version
 
-      # idempotent; builds the interpreter sysroot once so the run step's log
-      # starts at the actual test output
+      # pin the interpreter to a dynamic-libc gnu target; overrides any runner
+      # CARGO_BUILD_TARGET pointing at static musl. idempotent sysroot build so
+      # the run step's log starts at the actual test output.
       - name: miri setup
-        run: cargo miri setup
+        run: cargo miri setup --target x86_64-unknown-linux-gnu
 
       - name: cargo miri nextest
-        run: cargo miri nextest run ${{ inputs.miri-args }}
+        run: cargo miri nextest run --target x86_64-unknown-linux-gnu ${{ inputs.miri-args }}

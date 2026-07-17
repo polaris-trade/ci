@@ -78,6 +78,12 @@ jobs:
         with:
           tool: cargo-fuzz
 
+      # libFuzzer + sanitizer coverage need a dynamic-libc target. A runner that
+      # defaults builds to musl (static crt) breaks the sanitizer build, so pin
+      # the gnu target explicitly. Idempotent: no-op when gnu is already the host.
+      - name: ensure gnu target
+        run: rustup target add x86_64-unknown-linux-gnu
+
       # private cross-repo git deps need a credential the runner lacks by
       # default. job-scoped gitconfig, token never touches a persistent
       # ~/.gitconfig. no-op when no token is passed (public/crates.io deps).
@@ -116,6 +122,9 @@ jobs:
           FUZZ_DIR: ${{ inputs.fuzz-dir }}
           MAX_TOTAL_TIME: ${{ inputs.max-total-time }}
           TARGETS: ${{ inputs.targets }}
+          # pin the sanitizer build to dynamic-libc gnu; overrides any runner
+          # CARGO_BUILD_TARGET pointing at static musl
+          TRIPLE: x86_64-unknown-linux-gnu
         run: |
           set -euo pipefail
           case "$MODE" in check|discover) ;; *)
@@ -131,10 +140,10 @@ jobs:
           echo "targets: $TARGETS"
 
           if [[ "$MODE" == "check" ]]; then
-            cargo fuzz build --fuzz-dir "$FUZZ_DIR"
+            cargo fuzz build --fuzz-dir "$FUZZ_DIR" --target "$TRIPLE"
             for t in $TARGETS; do
               echo "::group::replay $t"
-              cargo fuzz run "$t" --fuzz-dir "$FUZZ_DIR" -- -runs=0
+              cargo fuzz run "$t" --fuzz-dir "$FUZZ_DIR" --target "$TRIPLE" -- -runs=0
               echo "::endgroup::"
             done
             exit 0
@@ -144,7 +153,7 @@ jobs:
           failed=()
           for t in $TARGETS; do
             echo "::group::discover $t (${MAX_TOTAL_TIME}s)"
-            if ! cargo fuzz run "$t" --fuzz-dir "$FUZZ_DIR" -- -max_total_time="$MAX_TOTAL_TIME"; then
+            if ! cargo fuzz run "$t" --fuzz-dir "$FUZZ_DIR" --target "$TRIPLE" -- -max_total_time="$MAX_TOTAL_TIME"; then
               failed+=("$t")
             fi
             echo "::endgroup::"
