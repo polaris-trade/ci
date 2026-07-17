@@ -117,6 +117,9 @@ jobs:
             exit 1
           fi
           cargo fuzz --version
+          # surface which build target actually wins on this runner
+          echo "CARGO_BUILD_TARGET=${CARGO_BUILD_TARGET:-<unset>}"
+          rustc -vV | grep host
 
       - name: run targets
         shell: bash
