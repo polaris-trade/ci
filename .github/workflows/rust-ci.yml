@@ -86,7 +86,7 @@ jobs:
       matrix: ${{ steps.toolchains.outputs.matrix }}
     steps:
       - uses: actions/checkout@v7
-      - uses: dorny/paths-filter@v3
+      - uses: dorny/paths-filter@v4
         id: filter
         with:
           filters: |
@@ -174,7 +174,7 @@ jobs:
       # Gate the cache step to GitHub-hosted runners only.
       - name: cache rustup toolchain
         if: ${{ runner.environment == 'github-hosted' }}
-        uses: actions/cache@v4
+        uses: actions/cache@v6
         with:
           path: |
             ~/.rustup/toolchains/nightly-*
@@ -210,7 +210,7 @@ jobs:
 
       - name: cache rustup toolchain
         if: ${{ runner.environment == 'github-hosted' }}
-        uses: actions/cache@v4
+        uses: actions/cache@v6
         with:
           path: |
             ~/.rustup/toolchains/stable-*
@@ -291,7 +291,7 @@ jobs:
       # both cache steps to GitHub-hosted runners only.
       - name: cache rustup toolchain
         if: ${{ runner.environment == 'github-hosted' }}
-        uses: actions/cache@v4
+        uses: actions/cache@v6
         with:
           path: |
             ~/.rustup/toolchains/${{ matrix.toolchain }}-*
