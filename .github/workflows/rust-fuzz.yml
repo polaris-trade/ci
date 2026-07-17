@@ -28,9 +28,14 @@ on:
         default: "fuzz"
         type: string
       max-total-time:
-        description: "Seconds of libFuzzer search per target (discover mode only)."
+        description: "Seconds of libFuzzer search per target (discover mode only). Wall clock is roughly this times the target count, so keep it small on a shared runner fleet."
         required: false
-        default: 900
+        default: 300
+        type: number
+      timeout-minutes:
+        description: "Hard ceiling on the whole job so a discover run cannot hold a shared runner indefinitely."
+        required: false
+        default: 30
         type: number
       targets:
         description: "Space-separated target names. Empty = every target from `cargo fuzz list`."
@@ -55,6 +60,14 @@ jobs:
   fuzz:
     name: fuzz ${{ inputs.mode }} (nightly)
     runs-on: ${{ startsWith(inputs.runner, '[') && fromJSON(inputs.runner) || inputs.runner }}
+    timeout-minutes: ${{ inputs.timeout-minutes }}
+    # keyed on mode so a check and a discover caller job never share a group
+    # (that collision cancels both). cancel-in-progress supersedes a stale run:
+    # a newer PR push replaces its check, a newer main merge replaces its
+    # discovery, so at most one fuzz job per mode per repo holds the fleet.
+    concurrency:
+      group: fuzz-${{ inputs.mode }}-${{ github.repository }}
+      cancel-in-progress: true
     continue-on-error: ${{ inputs.mode == 'discover' && inputs.advisory }}
     env:
       RUSTUP_TOOLCHAIN: nightly
