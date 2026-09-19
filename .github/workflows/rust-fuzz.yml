@@ -62,11 +62,12 @@ jobs:
     runs-on: ${{ startsWith(inputs.runner, '[') && fromJSON(inputs.runner) || inputs.runner }}
     timeout-minutes: ${{ inputs.timeout-minutes }}
     # keyed on mode so a check and a discover caller job never share a group
-    # (that collision cancels both). cancel-in-progress supersedes a stale run:
-    # a newer PR push replaces its check, a newer main merge replaces its
-    # discovery, so at most one fuzz job per mode per repo runs at a time.
+    # (that collision cancels both), and on ref so one PR's push never cancels
+    # another PR's check. cancel-in-progress supersedes a stale run: a newer
+    # push replaces its own PR's check, a newer main merge replaces its
+    # discovery, so at most one fuzz job per mode per ref runs at a time.
     concurrency:
-      group: fuzz-${{ inputs.mode }}-${{ github.repository }}
+      group: fuzz-${{ inputs.mode }}-${{ github.repository }}-${{ github.ref }}
       cancel-in-progress: true
     continue-on-error: ${{ inputs.mode == 'discover' && inputs.advisory }}
     env:
